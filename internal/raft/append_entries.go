@@ -5,8 +5,12 @@ import "time"
 const heartbeatInterval = 50 * time.Millisecond
 
 type AppendEntriesArgs struct {
-	Term     uint64
-	LeaderID string
+	Term         uint64
+	LeaderID     string
+	PrevLogIndex uint64
+	PrevLogTerm  uint64
+	Entries      []LogEntry
+	LeaderCommit uint64
 }
 
 type AppendEntriesReply struct {
@@ -25,9 +29,35 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	if args.Term > n.currentTerm || n.role == Candidate {
 		n.becomeFollowerLocked(args.Term)
 	}
-
 	n.electionResetAt = time.Now()
+
+	if args.PrevLogIndex > 0 {
+		if args.PrevLogIndex > n.lastLogIndexLocked() || n.logTermAtLocked(args.PrevLogIndex) != args.PrevLogTerm {
+			return AppendEntriesReply{Term: n.currentTerm, Success: false}
+		}
+	}
+
+	n.appendNewEntriesLocked(args.PrevLogIndex, args.Entries)
+
+	if args.LeaderCommit > n.commitIndex {
+		n.commitIndex = min(args.LeaderCommit, n.lastLogIndexLocked())
+	}
+
 	return AppendEntriesReply{Term: n.currentTerm, Success: true}
+}
+
+func (n *Node) appendNewEntriesLocked(prevLogIndex uint64, entries []LogEntry) {
+	for i, entry := range entries {
+		logIndex := prevLogIndex + uint64(i)
+		if logIndex < uint64(len(n.log)) {
+			if n.log[logIndex].Term == entry.Term {
+				continue
+			}
+			n.log = n.log[:logIndex]
+		}
+		n.log = append(n.log, entries[i:]...)
+		return
+	}
 }
 
 func (n *Node) runHeartbeats(term uint64) {

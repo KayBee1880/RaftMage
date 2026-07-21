@@ -90,8 +90,12 @@ func (n *Node) lastLogIndexLocked() uint64 {
 }
 
 func (n *Node) lastLogTermLocked() uint64 {
-	if len(n.log) == 0 {
+	return n.logTermAtLocked(n.lastLogIndexLocked())
+}
+
+func (n *Node) logTermAtLocked(index uint64) uint64 {
+	if index == 0 {
 		return 0
 	}
-	return n.log[len(n.log)-1].Term
+	return n.log[index-1].Term
 }

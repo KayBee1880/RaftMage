@@ -34,7 +34,9 @@ graph TB
 |---|---|
 | Raft Core (roles, terms, leader election, randomized election timeout) | Implemented |
 | AppendEntries — heartbeats | Implemented |
-| AppendEntries — log entry replication | Planned |
+| AppendEntries — log entry replication (follower side: consistency check, append/truncate, commit index) | Implemented |
+| AppendEntries — log entry replication (leader side: nextIndex/matchIndex, retry, commit advancement) | Planned |
+| Client-facing write API (`Propose`) | Planned |
 | Storage (WAL + snapshots) | Planned |
 | State Machine (KV store) | Planned |
 | Transport (real gRPC) | Planned — election and heartbeats currently run over an injected `Transport` interface (an in-process fake in unit tests, a loopback implementation in the multi-node integration test), not real network calls |
@@ -74,7 +76,7 @@ stateDiagram-v2
 
 Winning an election now also starts a heartbeat loop (`runHeartbeats`): the leader sends an empty `AppendEntries` to every peer every 50ms, well under the election-timeout floor. A follower receiving a valid heartbeat resets its own election clock, the same as granting a vote does — this is what keeps a healthy leader in power instead of its followers eventually timing out and forcing needless re-elections. Proven end-to-end (not just unit-tested) by `TestLeaderHeartbeatsPreventFollowerReelection`, which runs three real nodes over an in-process loopback transport and confirms the elected leader stays leader across multiple election-timeout windows.
 
-What's still missing: `AppendEntries` today only carries a term and leader ID — no actual log entries, `PrevLogIndex`/`PrevLogTerm` consistency checks, or commit index. That's the log replication milestone: turning this RPC from "I'm alive" into "here's the next entry to replicate."
+`AppendEntries` now carries real `PrevLogIndex`/`PrevLogTerm`/`Entries`/`LeaderCommit` fields, and `HandleAppendEntries` implements the full log matching property on the receiving end: rejects entries that don't line up with the follower's existing log, truncates and overwrites conflicting entries, and advances the follower's commit index as the leader reports progress. What's still missing is entirely on the *sending* side — nothing yet tracks each follower's replication progress (`nextIndex`/`matchIndex`), retries a rejected append at an earlier log position, or lets a client actually propose a write in the first place. `sendHeartbeats` today only ever sends empty entries; the receiving logic is ready for real ones the moment the leader side catches up.
 
 ## Package layout
 

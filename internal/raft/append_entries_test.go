@@ -65,3 +65,130 @@ func TestHandleAppendEntriesCandidateStepsDownOnEqualTerm(t *testing.T) {
 		t.Fatalf("role = %v after AppendEntries at same term, want %v", got, Follower)
 	}
 }
+
+func TestHandleAppendEntriesAppendsToEmptyLog(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:    1,
+		Entries: []LogEntry{{Term: 1, Command: []byte("a")}, {Term: 1, Command: []byte("b")}},
+	})
+
+	if !reply.Success {
+		t.Fatalf("expected success")
+	}
+	if got := len(n.log); got != 2 {
+		t.Fatalf("log length = %d, want 2", got)
+	}
+	if string(n.log[0].Command) != "a" || string(n.log[1].Command) != "b" {
+		t.Fatalf("log contents = %+v, want [a b]", n.log)
+	}
+}
+
+func TestHandleAppendEntriesRejectsPrevLogIndexBeyondLog(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         1,
+		PrevLogIndex: 5,
+		PrevLogTerm:  1,
+	})
+
+	if reply.Success {
+		t.Fatalf("expected rejection: PrevLogIndex beyond local log")
+	}
+	if len(n.log) != 0 {
+		t.Fatalf("log should be unchanged, got %+v", n.log)
+	}
+}
+
+func TestHandleAppendEntriesRejectsPrevLogTermMismatch(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+	n.log = []LogEntry{{Term: 1}}
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         2,
+		PrevLogIndex: 1,
+		PrevLogTerm:  2,
+	})
+
+	if reply.Success {
+		t.Fatalf("expected rejection: PrevLogTerm mismatch")
+	}
+}
+
+func TestHandleAppendEntriesTruncatesConflictingEntries(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+	n.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         2,
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		Entries:      []LogEntry{{Term: 2, Command: []byte("x")}},
+	})
+
+	if !reply.Success {
+		t.Fatalf("expected success")
+	}
+	if got := len(n.log); got != 2 {
+		t.Fatalf("log length = %d, want 2", got)
+	}
+	if n.log[1].Term != 2 || string(n.log[1].Command) != "x" {
+		t.Fatalf("log[1] = %+v, want Term=2 Command=x", n.log[1])
+	}
+}
+
+func TestHandleAppendEntriesIgnoresAlreadyMatchingEntries(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+	entries := []LogEntry{{Term: 1, Command: []byte("a")}, {Term: 1, Command: []byte("b")}}
+	n.HandleAppendEntries(AppendEntriesArgs{Term: 1, Entries: entries})
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{Term: 1, Entries: entries})
+
+	if !reply.Success {
+		t.Fatalf("expected success")
+	}
+	if got := len(n.log); got != 2 {
+		t.Fatalf("log length = %d after duplicate AppendEntries, want 2", got)
+	}
+}
+
+func TestHandleAppendEntriesAdvancesCommitIndex(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+	n.HandleAppendEntries(AppendEntriesArgs{
+		Term:    1,
+		Entries: []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}},
+	})
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         1,
+		PrevLogIndex: 3,
+		PrevLogTerm:  1,
+		LeaderCommit: 2,
+	})
+
+	if !reply.Success {
+		t.Fatalf("expected success")
+	}
+	if n.commitIndex != 2 {
+		t.Fatalf("commitIndex = %d, want 2", n.commitIndex)
+	}
+}
+
+func TestHandleAppendEntriesCommitIndexBoundedByLocalLog(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil)
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         1,
+		Entries:      []LogEntry{{Term: 1}, {Term: 1}},
+		LeaderCommit: 10,
+	})
+
+	if !reply.Success {
+		t.Fatalf("expected success")
+	}
+	if n.commitIndex != 2 {
+		t.Fatalf("commitIndex = %d, want 2 (bounded by local log length)", n.commitIndex)
+	}
+}
