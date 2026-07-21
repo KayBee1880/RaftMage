@@ -33,10 +33,11 @@ graph TB
 | Component | Status |
 |---|---|
 | Raft Core (roles, terms, leader election, randomized election timeout) | Implemented |
-| Log replication (AppendEntries) | Planned |
+| AppendEntries — heartbeats | Implemented |
+| AppendEntries — log entry replication | Planned |
 | Storage (WAL + snapshots) | Planned |
 | State Machine (KV store) | Planned |
-| Transport (real gRPC) | Planned — election currently runs over an injected in-process `Transport` interface for testing, not real network calls |
+| Transport (real gRPC) | Planned — election and heartbeats currently run over an injected `Transport` interface (an in-process fake in unit tests, a loopback implementation in the multi-node integration test), not real network calls |
 | Client API | Planned |
 
 ## Raft core dependency direction
@@ -71,7 +72,9 @@ stateDiagram-v2
 
 `Node.Run()` starts a background goroutine (`runElectionTimer`) that fires `StartElection` automatically once a randomized timeout (150–300ms) elapses without the node hearing from a leader or granting a vote. `Run()` is opt-in — unit tests construct nodes and drive transitions manually without ever calling it, so the extensive test suite stays deterministic and doesn't race against background timers.
 
-One real gap remains: the timer currently only resets on granting a vote. There's no way yet for an elected **leader** to signal "I'm still alive" to its followers, because that's normally done via heartbeats — empty `AppendEntries` RPCs sent periodically by the leader — and `AppendEntries` doesn't exist yet (it's part of log replication). So today, a freshly elected leader's followers will eventually time out and start new elections regardless of whether the leader is healthy. This is expected and will be resolved once log replication adds heartbeats.
+Winning an election now also starts a heartbeat loop (`runHeartbeats`): the leader sends an empty `AppendEntries` to every peer every 50ms, well under the election-timeout floor. A follower receiving a valid heartbeat resets its own election clock, the same as granting a vote does — this is what keeps a healthy leader in power instead of its followers eventually timing out and forcing needless re-elections. Proven end-to-end (not just unit-tested) by `TestLeaderHeartbeatsPreventFollowerReelection`, which runs three real nodes over an in-process loopback transport and confirms the elected leader stays leader across multiple election-timeout windows.
+
+What's still missing: `AppendEntries` today only carries a term and leader ID — no actual log entries, `PrevLogIndex`/`PrevLogTerm` consistency checks, or commit index. That's the log replication milestone: turning this RPC from "I'm alive" into "here's the next entry to replicate."
 
 ## Package layout
 
@@ -79,7 +82,7 @@ Only what currently exists; more packages get added as later milestones need the
 
 ```
 raftmage/
-  internal/raft/     Raft consensus core — Node, roles, RequestVote RPC, election
+  internal/raft/     Raft consensus core — Node, roles, RequestVote/AppendEntries RPCs, election, heartbeats
   docs/               This document and future design docs
   private/            Gitignored personal study notes (mirrors real file paths)
 ```

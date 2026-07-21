@@ -92,6 +92,9 @@ func (n *Node) StartElection() {
 	}
 	if votes >= votesNeeded {
 		n.role = Leader
+		if n.running {
+			go n.runHeartbeats(term)
+		}
 		return
 	}
 	n.electionResetAt = time.Now()

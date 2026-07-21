@@ -17,6 +17,13 @@ func (f *fakeTransport) SendRequestVote(peer string, args RequestVoteArgs) (Requ
 	return f.replies[peer], nil
 }
 
+func (f *fakeTransport) SendAppendEntries(peer string, args AppendEntriesArgs) (AppendEntriesReply, error) {
+	if f.errPeer[peer] {
+		return AppendEntriesReply{}, errors.New("simulated network error")
+	}
+	return AppendEntriesReply{Term: args.Term, Success: true}, nil
+}
+
 func TestHandleRequestVoteGrantsWhenTermIsNewer(t *testing.T) {
 	n := NewNode("node-1", []string{"node-2"}, nil)
 
