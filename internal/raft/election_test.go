@@ -2,12 +2,19 @@ package raft
 
 import (
 	"errors"
+	"sync"
 	"testing"
 )
 
 type fakeTransport struct {
 	replies map[string]RequestVoteReply
 	errPeer map[string]bool
+
+	appendEntriesFn func(peer string, args AppendEntriesArgs) (AppendEntriesReply, error)
+	appendReplies   map[string]AppendEntriesReply
+
+	mu               sync.Mutex
+	appendEntriesLog []AppendEntriesArgs
 }
 
 func (f *fakeTransport) SendRequestVote(peer string, args RequestVoteArgs) (RequestVoteReply, error) {
@@ -20,6 +27,17 @@ func (f *fakeTransport) SendRequestVote(peer string, args RequestVoteArgs) (Requ
 func (f *fakeTransport) SendAppendEntries(peer string, args AppendEntriesArgs) (AppendEntriesReply, error) {
 	if f.errPeer[peer] {
 		return AppendEntriesReply{}, errors.New("simulated network error")
+	}
+
+	f.mu.Lock()
+	f.appendEntriesLog = append(f.appendEntriesLog, args)
+	f.mu.Unlock()
+
+	if f.appendEntriesFn != nil {
+		return f.appendEntriesFn(peer, args)
+	}
+	if reply, ok := f.appendReplies[peer]; ok {
+		return reply, nil
 	}
 	return AppendEntriesReply{Term: args.Term, Success: true}, nil
 }

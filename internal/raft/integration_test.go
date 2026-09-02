@@ -89,3 +89,52 @@ func TestLeaderHeartbeatsPreventFollowerReelection(t *testing.T) {
 		t.Fatalf("leader %s term changed from %d to %d — re-election happened despite heartbeats", leaderID, leaderTerm, got)
 	}
 }
+
+func TestLeaderReplicatesAndCommitsAcrossRealNodes(t *testing.T) {
+	transport := newLoopbackTransport()
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport)
+	nodes := []*Node{n1, n2, n3}
+
+	for _, n := range nodes {
+		transport.register(n)
+	}
+	for _, n := range nodes {
+		n.Run()
+	}
+	defer func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	}()
+
+	leader := waitForAnyLeader(t, nodes, 2*time.Second)
+
+	leader.mu.Lock()
+	leader.log = append(leader.log, LogEntry{Term: leader.currentTerm, Command: []byte("set x=1")})
+	leader.mu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		allCaughtUp := true
+		for _, n := range nodes {
+			n.mu.Lock()
+			caughtUp := len(n.log) == 1 &&
+				string(n.log[0].Command) == "set x=1" &&
+				n.commitIndex == 1
+			n.mu.Unlock()
+			if !caughtUp {
+				allCaughtUp = false
+				break
+			}
+		}
+		if allCaughtUp {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not every node replicated and committed the leader's entry within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
