@@ -92,6 +92,7 @@ func (n *Node) StartElection() {
 	}
 	if votes >= votesNeeded {
 		n.role = Leader
+		n.initLeaderStateLocked()
 		if n.running {
 			go n.runHeartbeats(term)
 		}

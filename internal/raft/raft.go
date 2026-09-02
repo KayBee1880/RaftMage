@@ -48,6 +48,9 @@ type Node struct {
 	commitIndex uint64
 	lastApplied uint64
 
+	nextIndex  map[string]uint64
+	matchIndex map[string]uint64
+
 	electionResetAt time.Time
 	running         bool
 	ctx             context.Context

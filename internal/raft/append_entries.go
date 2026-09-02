@@ -85,25 +85,84 @@ func (n *Node) runHeartbeats(term uint64) {
 func (n *Node) sendHeartbeats(term uint64) {
 	n.mu.Lock()
 	peers := append([]string(nil), n.peers...)
-	transport := n.transport
-	leaderID := n.id
 	n.mu.Unlock()
 
-	args := AppendEntriesArgs{Term: term, LeaderID: leaderID}
-
 	for _, peer := range peers {
-		go func(peer string) {
-			reply, err := transport.SendAppendEntries(peer, args)
-			if err != nil {
-				return
+		go n.replicatePeer(term, peer)
+	}
+}
+
+func (n *Node) initLeaderStateLocked() {
+	n.nextIndex = make(map[string]uint64, len(n.peers))
+	n.matchIndex = make(map[string]uint64, len(n.peers))
+	for _, peer := range n.peers {
+		n.nextIndex[peer] = n.lastLogIndexLocked() + 1
+		n.matchIndex[peer] = 0
+	}
+}
+
+func (n *Node) replicatePeer(term uint64, peer string) {
+	for {
+		n.mu.Lock()
+		if n.role != Leader || n.currentTerm != term {
+			n.mu.Unlock()
+			return
+		}
+		prevLogIndex := n.nextIndex[peer] - 1
+		args := AppendEntriesArgs{
+			Term:         term,
+			LeaderID:     n.id,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  n.logTermAtLocked(prevLogIndex),
+			Entries:      append([]LogEntry(nil), n.log[prevLogIndex:]...),
+			LeaderCommit: n.commitIndex,
+		}
+		transport := n.transport
+		n.mu.Unlock()
+
+		reply, err := transport.SendAppendEntries(peer, args)
+		if err != nil {
+			return
+		}
+
+		n.mu.Lock()
+		if n.role != Leader || n.currentTerm != term {
+			n.mu.Unlock()
+			return
+		}
+		if reply.Term > n.currentTerm {
+			n.becomeFollowerLocked(reply.Term)
+			n.mu.Unlock()
+			return
+		}
+		if reply.Success {
+			n.matchIndex[peer] = prevLogIndex + uint64(len(args.Entries))
+			n.nextIndex[peer] = n.matchIndex[peer] + 1
+			n.advanceCommitIndexLocked(term)
+			n.mu.Unlock()
+			return
+		}
+		if n.nextIndex[peer] > 1 {
+			n.nextIndex[peer]--
+		}
+		n.mu.Unlock()
+	}
+}
+
+func (n *Node) advanceCommitIndexLocked(term uint64) {
+	for N := n.lastLogIndexLocked(); N > n.commitIndex; N-- {
+		if n.logTermAtLocked(N) != term {
+			break
+		}
+		replicated := 1
+		for _, peer := range n.peers {
+			if n.matchIndex[peer] >= N {
+				replicated++
 			}
-			if reply.Term > term {
-				n.mu.Lock()
-				if reply.Term > n.currentTerm {
-					n.becomeFollowerLocked(reply.Term)
-				}
-				n.mu.Unlock()
-			}
-		}(peer)
+		}
+		if replicated*2 > len(n.peers)+1 {
+			n.commitIndex = N
+			return
+		}
 	}
 }
