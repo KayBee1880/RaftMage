@@ -111,9 +111,9 @@ func TestLeaderReplicatesAndCommitsAcrossRealNodes(t *testing.T) {
 
 	leader := waitForAnyLeader(t, nodes, 2*time.Second)
 
-	leader.mu.Lock()
-	leader.log = append(leader.log, LogEntry{Term: leader.currentTerm, Command: []byte("set x=1")})
-	leader.mu.Unlock()
+	if _, _, isLeader := leader.Propose([]byte("set x=1")); !isLeader {
+		t.Fatalf("Propose on the elected leader reported isLeader = false")
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
