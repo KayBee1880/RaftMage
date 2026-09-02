@@ -41,7 +41,8 @@ Principles this build has actually practiced — each one checkable against the 
 - **Leader liveness** — `AppendEntries` heartbeats every 50ms that keep a healthy elected leader in power. Proven with three real `Node` instances in a genuine election, not just asserted: `TestLeaderHeartbeatsPreventFollowerReelection`.
 - **Log replication (follower side)** — consistency checking against `PrevLogIndex`/`PrevLogTerm`, truncation of conflicting entries, idempotent handling of retried/duplicate RPCs, and commit-index advancement bounded by what's actually stored locally.
 - **Log replication (leader side)** — per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
-- **36 tests, all passing**, run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Client-facing write API (`Propose`)** — the first way to actually get a write into the cluster: rejected outright on a non-leader (`isLeader == false`, so a client knows to look elsewhere), otherwise appended to the leader's log and replicated immediately rather than waiting for the next 50ms heartbeat tick. A single-node cluster commits its own proposal instantly, since the leader alone is already a majority.
+- **40 tests, all passing**, run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner — there is no standalone server binary or client yet. See Roadmap.
 
@@ -98,7 +99,6 @@ graph TB
 
 | Component | Milestone |
 |---|---|
-| Client-facing write API (`Propose`) | Log replication, part 3 |
 | gRPC + Protocol Buffers | Real network transport |
 | Custom write-ahead log | Persistence & crash recovery |
 | Log compaction | Snapshotting |
@@ -113,8 +113,8 @@ graph TB
 - [x] `AppendEntries` heartbeats (leader liveness)
 - [x] Log replication — follower side (consistency check, append/truncate, commit index)
 - [x] Log replication — leader side (`nextIndex`/`matchIndex`, retry, commit advancement)
-- [ ] **Client-facing write API (`Propose`)** ← current
-- [ ] Persistent write-ahead log + crash recovery
+- [x] Client-facing write API (`Propose`)
+- [ ] **Persistent write-ahead log + crash recovery** ← current
 - [ ] Snapshotting + log compaction
 - [ ] Real gRPC transport
 - [ ] Cluster membership changes
@@ -144,8 +144,9 @@ raftmage/
         ├── election.go          # RequestVote RPC, leader election
         ├── election_timer.go    # randomized election-timeout loop
         ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (both sides)
+        ├── propose.go           # Propose — the client-facing write API
         ├── transport.go         # Transport interface — the network dependency-inversion boundary
-        └── *_test.go            # 36 tests, including two 3-node integration tests
+        └── *_test.go            # 40 tests, including two 3-node integration tests
 ```
 
 No `cmd/` entrypoint yet — there is nothing to `go run`. See Roadmap.
@@ -170,10 +171,11 @@ make test
 
 `make race` / `go test ./... -race` requires a cgo-capable toolchain — works in CI, may not work on every local machine.
 
-The closest thing to a running demo right now — three real nodes electing a leader and staying stable under it, end to end:
+The closest thing to a running demo right now — three real nodes electing a leader, staying stable under it, and replicating and committing a real client write via `Propose`, end to end:
 
 ```
 go test ./internal/raft -run TestLeaderHeartbeatsPreventFollowerReelection -v
+go test ./internal/raft -run TestLeaderReplicatesAndCommitsAcrossRealNodes -v
 ```
 
 ## Documentation

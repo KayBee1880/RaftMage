@@ -36,7 +36,7 @@ graph TB
 | AppendEntries — heartbeats | Implemented |
 | AppendEntries — log entry replication (follower side: consistency check, append/truncate, commit index) | Implemented |
 | AppendEntries — log entry replication (leader side: nextIndex/matchIndex, retry, commit advancement) | Implemented |
-| Client-facing write API (`Propose`) | Planned |
+| Client-facing write API (`Propose`) | Implemented — internal `Node.Propose` only, not yet exposed over a network API (see `Client API` row below) |
 | Storage (WAL + snapshots) | Planned |
 | State Machine (KV store) | Planned |
 | Transport (real gRPC) | Planned — election and heartbeats currently run over an injected `Transport` interface (an in-process fake in unit tests, a loopback implementation in the multi-node integration test), not real network calls |
@@ -76,7 +76,9 @@ stateDiagram-v2
 
 Winning an election now also starts a heartbeat loop (`runHeartbeats`): the leader sends an empty `AppendEntries` to every peer every 50ms, well under the election-timeout floor. A follower receiving a valid heartbeat resets its own election clock, the same as granting a vote does — this is what keeps a healthy leader in power instead of its followers eventually timing out and forcing needless re-elections. Proven end-to-end (not just unit-tested) by `TestLeaderHeartbeatsPreventFollowerReelection`, which runs three real nodes over an in-process loopback transport and confirms the elected leader stays leader across multiple election-timeout windows.
 
-`AppendEntries` now carries real `PrevLogIndex`/`PrevLogTerm`/`Entries`/`LeaderCommit` fields, and `HandleAppendEntries` implements the full log matching property on the receiving end: rejects entries that don't line up with the follower's existing log, truncates and overwrites conflicting entries, and advances the follower's commit index as the leader reports progress. The leader side now exists too: winning an election initializes `nextIndex`/`matchIndex` for every peer, and the same periodic heartbeat loop that keeps a leader in power now also drives replication — each round sends every peer whatever it's missing (nothing, for a fully caught-up follower, which is what makes a plain heartbeat and a replication attempt the same code path), retries immediately at an earlier log position whenever a follower rejects for a log inconsistency, and advances the leader's own commit index once an entry from its current term reaches a majority — Raft's specific rule that a leader may only directly commit an entry from its own term, never an earlier one, no matter how widely replicated. What's still missing is a way for a client to get an entry into the leader's log in the first place: there's no `Propose` API yet, so today only tests (seeding a leader's log directly) exercise this path. `docs/architecture.md`'s dependency-injection and testing story (real logic, only the network faked) held throughout — no part of leader-side replication needed a change to that design.
+`AppendEntries` now carries real `PrevLogIndex`/`PrevLogTerm`/`Entries`/`LeaderCommit` fields, and `HandleAppendEntries` implements the full log matching property on the receiving end: rejects entries that don't line up with the follower's existing log, truncates and overwrites conflicting entries, and advances the follower's commit index as the leader reports progress. The leader side exists too: winning an election initializes `nextIndex`/`matchIndex` for every peer, and the same periodic heartbeat loop that keeps a leader in power also drives replication — each round sends every peer whatever it's missing (nothing, for a fully caught-up follower, which is what makes a plain heartbeat and a replication attempt the same code path), retries immediately at an earlier log position whenever a follower rejects for a log inconsistency, and advances the leader's own commit index once an entry from its current term reaches a majority — Raft's specific rule that a leader may only directly commit an entry from its own term, never an earlier one, no matter how widely replicated.
+
+What was still missing after that milestone was a way for a client to get an entry into the leader's log in the first place — that gap is closed now: `Node.Propose(command []byte) (index, term uint64, isLeader bool)` appends to the leader's own log (rejecting outright, `isLeader == false`, if called on a non-leader — Raft always resolves writes at the leader, never a follower) and immediately triggers a replication round rather than waiting for the next heartbeat tick, so a proposed write starts propagating with no added latency beyond the RPC round trips themselves. It also runs the same commit-advancement check inline before returning — the one case that needs this is a single-node cluster, whose leader is already its own majority and would otherwise never see a `replicatePeer` success reply (there are no peers to reply) to trigger a commit at all. `Propose` is still an in-process Go method, not a network RPC — the `Client API` row in the status table above (gRPC `Get`/`Put`/`Delete`) is the next layer up, still Planned, and is what would actually call `Propose` from outside the process once it exists.
 
 ## Package layout
 
@@ -84,7 +86,7 @@ Only what currently exists; more packages get added as later milestones need the
 
 ```
 raftmage/
-  internal/raft/     Raft consensus core — Node, roles, RequestVote/AppendEntries RPCs, election, heartbeats
+  internal/raft/     Raft consensus core — Node, roles, RequestVote/AppendEntries RPCs, election, heartbeats, Propose
   docs/               This document and future design docs
   private/            Gitignored personal study notes (mirrors real file paths)
 ```
