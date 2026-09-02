@@ -40,7 +40,8 @@ Principles this build has actually practiced — each one checkable against the 
 - **Automatic elections** — a randomized election-timeout loop (150–300ms per node) that triggers a new election with no manual intervention, specifically to avoid every node timing out simultaneously and splitting the vote forever.
 - **Leader liveness** — `AppendEntries` heartbeats every 50ms that keep a healthy elected leader in power. Proven with three real `Node` instances in a genuine election, not just asserted: `TestLeaderHeartbeatsPreventFollowerReelection`.
 - **Log replication (follower side)** — consistency checking against `PrevLogIndex`/`PrevLogTerm`, truncation of conflicting entries, idempotent handling of retried/duplicate RPCs, and commit-index advancement bounded by what's actually stored locally.
-- **27 tests, all passing**, run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Log replication (leader side)** — per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
+- **36 tests, all passing**, run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner — there is no standalone server binary or client yet. See Roadmap.
 
@@ -97,7 +98,7 @@ graph TB
 
 | Component | Milestone |
 |---|---|
-| Leader-side replication (`nextIndex`/`matchIndex`, retry, commit advancement) | Log replication, part 2 |
+| Client-facing write API (`Propose`) | Log replication, part 3 |
 | gRPC + Protocol Buffers | Real network transport |
 | Custom write-ahead log | Persistence & crash recovery |
 | Log compaction | Snapshotting |
@@ -111,8 +112,8 @@ graph TB
 - [x] Randomized election-timeout loop (automatic elections)
 - [x] `AppendEntries` heartbeats (leader liveness)
 - [x] Log replication — follower side (consistency check, append/truncate, commit index)
-- [ ] **Log replication — leader side** (`nextIndex`/`matchIndex`, retry, commit advancement) ← current
-- [ ] Client-facing write API (`Propose`)
+- [x] Log replication — leader side (`nextIndex`/`matchIndex`, retry, commit advancement)
+- [ ] **Client-facing write API (`Propose`)** ← current
 - [ ] Persistent write-ahead log + crash recovery
 - [ ] Snapshotting + log compaction
 - [ ] Real gRPC transport
@@ -142,9 +143,9 @@ raftmage/
         ├── raft.go              # Node state: roles, terms, log
         ├── election.go          # RequestVote RPC, leader election
         ├── election_timer.go    # randomized election-timeout loop
-        ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (follower side)
+        ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (both sides)
         ├── transport.go         # Transport interface — the network dependency-inversion boundary
-        └── *_test.go            # 27 tests, including a 3-node integration test
+        └── *_test.go            # 36 tests, including two 3-node integration tests
 ```
 
 No `cmd/` entrypoint yet — there is nothing to `go run`. See Roadmap.
