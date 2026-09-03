@@ -35,6 +35,7 @@ func (n *Node) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 	}
 
 	n.votedFor = args.CandidateID
+	n.persistStateLocked()
 	n.electionResetAt = time.Now()
 	return RequestVoteReply{Term: n.currentTerm, VoteGranted: true}
 }
@@ -45,6 +46,7 @@ func (n *Node) StartElection() {
 	n.currentTerm++
 	term := n.currentTerm
 	n.votedFor = n.id
+	n.persistStateLocked()
 	args := RequestVoteArgs{
 		Term:         term,
 		CandidateID:  n.id,
@@ -108,6 +110,7 @@ func (n *Node) becomeFollowerLocked(term uint64) {
 	n.role = Follower
 	n.currentTerm = term
 	n.votedFor = ""
+	n.persistStateLocked()
 	n.electionResetAt = time.Now()
 	if n.running {
 		go n.runElectionTimer(term)

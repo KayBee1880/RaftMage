@@ -38,6 +38,7 @@ type Node struct {
 	id        string
 	peers     []string
 	transport Transport
+	storage   Storage
 
 	role Role
 
@@ -57,16 +58,43 @@ type Node struct {
 	cancel          context.CancelFunc
 }
 
-func NewNode(id string, peers []string, transport Transport) *Node {
+func NewNode(id string, peers []string, transport Transport, storage Storage) *Node {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Node{
+	n := &Node{
 		id:              id,
 		peers:           peers,
 		transport:       transport,
+		storage:         storage,
 		role:            Follower,
 		electionResetAt: time.Now(),
 		ctx:             ctx,
 		cancel:          cancel,
+	}
+
+	if storage != nil {
+		state, err := storage.Load()
+		if err != nil {
+			panic("raft: failed to load persistent state: " + err.Error())
+		}
+		n.currentTerm = state.CurrentTerm
+		n.votedFor = state.VotedFor
+		n.log = state.Log
+	}
+
+	return n
+}
+
+func (n *Node) persistStateLocked() {
+	if n.storage == nil {
+		return
+	}
+	state := PersistentState{
+		CurrentTerm: n.currentTerm,
+		VotedFor:    n.votedFor,
+		Log:         n.log,
+	}
+	if err := n.storage.Save(state); err != nil {
+		panic("raft: failed to persist state: " + err.Error())
 	}
 }
 

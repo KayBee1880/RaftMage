@@ -38,6 +38,9 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	}
 
 	n.appendNewEntriesLocked(args.PrevLogIndex, args.Entries)
+	if len(args.Entries) > 0 {
+		n.persistStateLocked()
+	}
 
 	if args.LeaderCommit > n.commitIndex {
 		n.commitIndex = min(args.LeaderCommit, n.lastLogIndexLocked())
