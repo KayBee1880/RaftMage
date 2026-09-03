@@ -59,9 +59,9 @@ func waitForAnyLeader(t *testing.T, nodes []*Node, timeout time.Duration) *Node 
 
 func TestLeaderHeartbeatsPreventFollowerReelection(t *testing.T) {
 	transport := newLoopbackTransport()
-	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport)
-	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport)
-	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport)
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
 	nodes := []*Node{n1, n2, n3}
 
 	for _, n := range nodes {
@@ -92,9 +92,9 @@ func TestLeaderHeartbeatsPreventFollowerReelection(t *testing.T) {
 
 func TestLeaderReplicatesAndCommitsAcrossRealNodes(t *testing.T) {
 	transport := newLoopbackTransport()
-	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport)
-	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport)
-	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport)
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
 	nodes := []*Node{n1, n2, n3}
 
 	for _, n := range nodes {

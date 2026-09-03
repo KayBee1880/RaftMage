@@ -42,8 +42,39 @@ func (f *fakeTransport) SendAppendEntries(peer string, args AppendEntriesArgs) (
 	return AppendEntriesReply{Term: args.Term, Success: true}, nil
 }
 
+var errSimulatedStorageFailure = errors.New("simulated storage failure")
+
+type fakeStorage struct {
+	mu       sync.Mutex
+	saved    []PersistentState
+	loadErr  error
+	saveErr  error
+}
+
+func (f *fakeStorage) Save(state PersistentState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.saved = append(f.saved, state)
+	return nil
+}
+
+func (f *fakeStorage) Load() (PersistentState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return PersistentState{}, f.loadErr
+	}
+	if len(f.saved) == 0 {
+		return PersistentState{}, nil
+	}
+	return f.saved[len(f.saved)-1], nil
+}
+
 func TestHandleRequestVoteGrantsWhenTermIsNewer(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	reply := n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-2"})
 
@@ -59,7 +90,7 @@ func TestHandleRequestVoteGrantsWhenTermIsNewer(t *testing.T) {
 }
 
 func TestHandleRequestVoteDeniesStaleTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-2"})
 
 	reply := n.HandleRequestVote(RequestVoteArgs{Term: 3, CandidateID: "node-3"})
@@ -73,7 +104,7 @@ func TestHandleRequestVoteDeniesStaleTerm(t *testing.T) {
 }
 
 func TestHandleRequestVoteDeniesSecondCandidateSameTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2", "node-3"}, nil)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, nil, nil)
 	n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-2"})
 
 	reply := n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-3"})
@@ -84,7 +115,7 @@ func TestHandleRequestVoteDeniesSecondCandidateSameTerm(t *testing.T) {
 }
 
 func TestHandleRequestVoteRegrantsSameCandidateSameTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-2"})
 
 	reply := n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-2"})
@@ -95,7 +126,7 @@ func TestHandleRequestVoteRegrantsSameCandidateSameTerm(t *testing.T) {
 }
 
 func TestHandleRequestVoteDeniesOutOfDateLog(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.log = []LogEntry{{Term: 3}, {Term: 4}}
 
 	reply := n.HandleRequestVote(RequestVoteArgs{
@@ -111,7 +142,7 @@ func TestHandleRequestVoteDeniesOutOfDateLog(t *testing.T) {
 }
 
 func TestStartElectionSingleNodeClusterBecomesLeaderImmediately(t *testing.T) {
-	n := NewNode("node-1", nil, nil)
+	n := NewNode("node-1", nil, nil, nil)
 
 	n.StartElection()
 
@@ -130,7 +161,7 @@ func TestStartElectionWinsWithMajority(t *testing.T) {
 			"node-3": {Term: 1, VoteGranted: false},
 		},
 	}
-	n := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
 
 	n.StartElection()
 
@@ -146,7 +177,7 @@ func TestStartElectionLosesWithoutMajority(t *testing.T) {
 			"node-3": {Term: 1, VoteGranted: false},
 		},
 	}
-	n := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
 
 	n.StartElection()
 
@@ -162,7 +193,7 @@ func TestStartElectionStepsDownOnHigherTerm(t *testing.T) {
 			"node-3": {Term: 1, VoteGranted: true},
 		},
 	}
-	n := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
 
 	n.StartElection()
 
@@ -181,7 +212,7 @@ func TestStartElectionIgnoresTransportErrors(t *testing.T) {
 		},
 		errPeer: map[string]bool{"node-3": true},
 	}
-	n := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
 
 	n.StartElection()
 

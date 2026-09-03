@@ -18,7 +18,7 @@ func waitForRole(t *testing.T, n *Node, want Role, timeout time.Duration) {
 }
 
 func TestRunSingleNodeBecomesLeaderAutomatically(t *testing.T) {
-	n := NewNode("node-1", nil, nil)
+	n := NewNode("node-1", nil, nil, nil)
 	n.Run()
 	defer n.Stop()
 
@@ -32,7 +32,7 @@ func TestRunThreeNodeClusterElectsLeaderAutomatically(t *testing.T) {
 			"node-3": {VoteGranted: true},
 		},
 	}
-	n := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
 	n.Run()
 	defer n.Stop()
 
@@ -40,7 +40,7 @@ func TestRunThreeNodeClusterElectsLeaderAutomatically(t *testing.T) {
 }
 
 func TestStopPreventsFurtherElections(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, &fakeTransport{})
+	n := NewNode("node-1", []string{"node-2"}, &fakeTransport{}, nil)
 	n.Run()
 	n.Stop()
 
@@ -52,7 +52,7 @@ func TestStopPreventsFurtherElections(t *testing.T) {
 }
 
 func TestRunCalledTwiceIsIdempotent(t *testing.T) {
-	n := NewNode("node-1", nil, nil)
+	n := NewNode("node-1", nil, nil, nil)
 	n.Run()
 	n.Run()
 	defer n.Stop()

@@ -3,7 +3,7 @@ package raft
 import "testing"
 
 func TestHandleAppendEntriesRejectsStaleTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.HandleRequestVote(RequestVoteArgs{Term: 5, CandidateID: "node-2"})
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{Term: 3, LeaderID: "node-3"})
@@ -17,7 +17,7 @@ func TestHandleAppendEntriesRejectsStaleTerm(t *testing.T) {
 }
 
 func TestHandleAppendEntriesAcceptsCurrentTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{Term: 0, LeaderID: "node-2"})
 
@@ -27,7 +27,7 @@ func TestHandleAppendEntriesAcceptsCurrentTerm(t *testing.T) {
 }
 
 func TestHandleAppendEntriesAdoptsHigherTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{Term: 7, LeaderID: "node-2"})
 
@@ -49,7 +49,7 @@ func TestHandleAppendEntriesCandidateStepsDownOnEqualTerm(t *testing.T) {
 			"node-3": {Term: 1, VoteGranted: false},
 		},
 	}
-	n := NewNode("node-1", []string{"node-2", "node-3"}, transport)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
 	n.StartElection()
 
 	if got := n.Role(); got != Candidate {
@@ -67,7 +67,7 @@ func TestHandleAppendEntriesCandidateStepsDownOnEqualTerm(t *testing.T) {
 }
 
 func TestHandleAppendEntriesAppendsToEmptyLog(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{
 		Term:    1,
@@ -86,7 +86,7 @@ func TestHandleAppendEntriesAppendsToEmptyLog(t *testing.T) {
 }
 
 func TestHandleAppendEntriesRejectsPrevLogIndexBeyondLog(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{
 		Term:         1,
@@ -103,7 +103,7 @@ func TestHandleAppendEntriesRejectsPrevLogIndexBeyondLog(t *testing.T) {
 }
 
 func TestHandleAppendEntriesRejectsPrevLogTermMismatch(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}}
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{
@@ -118,7 +118,7 @@ func TestHandleAppendEntriesRejectsPrevLogTermMismatch(t *testing.T) {
 }
 
 func TestHandleAppendEntriesTruncatesConflictingEntries(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{
@@ -140,7 +140,7 @@ func TestHandleAppendEntriesTruncatesConflictingEntries(t *testing.T) {
 }
 
 func TestHandleAppendEntriesIgnoresAlreadyMatchingEntries(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	entries := []LogEntry{{Term: 1, Command: []byte("a")}, {Term: 1, Command: []byte("b")}}
 	n.HandleAppendEntries(AppendEntriesArgs{Term: 1, Entries: entries})
 
@@ -155,7 +155,7 @@ func TestHandleAppendEntriesIgnoresAlreadyMatchingEntries(t *testing.T) {
 }
 
 func TestHandleAppendEntriesAdvancesCommitIndex(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 	n.HandleAppendEntries(AppendEntriesArgs{
 		Term:    1,
 		Entries: []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}},
@@ -177,7 +177,7 @@ func TestHandleAppendEntriesAdvancesCommitIndex(t *testing.T) {
 }
 
 func TestHandleAppendEntriesCommitIndexBoundedByLocalLog(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	reply := n.HandleAppendEntries(AppendEntriesArgs{
 		Term:         1,
@@ -194,7 +194,7 @@ func TestHandleAppendEntriesCommitIndexBoundedByLocalLog(t *testing.T) {
 }
 
 func TestInitLeaderStateLockedStartsNextIndexAtOwnLogEnd(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2", "node-3"}, nil)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 1}}
 
 	n.initLeaderStateLocked()
@@ -210,7 +210,7 @@ func TestInitLeaderStateLockedStartsNextIndexAtOwnLogEnd(t *testing.T) {
 }
 
 func TestStartElectionInitializesLeaderState(t *testing.T) {
-	n := NewNode("node-1", nil, nil)
+	n := NewNode("node-1", nil, nil, nil)
 
 	n.StartElection()
 
@@ -221,7 +221,7 @@ func TestStartElectionInitializesLeaderState(t *testing.T) {
 
 func TestReplicatePeerSendsEntriesAndAdvancesIndexesOnSuccess(t *testing.T) {
 	transport := &fakeTransport{}
-	n := NewNode("node-1", []string{"node-2"}, transport)
+	n := NewNode("node-1", []string{"node-2"}, transport, nil)
 	n.currentTerm = 1
 	n.role = Leader
 	n.initLeaderStateLocked()
@@ -258,7 +258,7 @@ func TestReplicatePeerRetriesWithEarlierPrevLogIndexAfterRejection(t *testing.T)
 			return AppendEntriesReply{Term: args.Term, Success: true}, nil
 		},
 	}
-	n := NewNode("node-1", []string{"node-2"}, transport)
+	n := NewNode("node-1", []string{"node-2"}, transport, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
 	n.currentTerm = 1
 	n.role = Leader
@@ -289,7 +289,7 @@ func TestReplicatePeerStepsDownOnHigherTerm(t *testing.T) {
 			"node-2": {Term: 5, Success: false},
 		},
 	}
-	n := NewNode("node-1", []string{"node-2"}, transport)
+	n := NewNode("node-1", []string{"node-2"}, transport, nil)
 	n.currentTerm = 1
 	n.role = Leader
 	n.initLeaderStateLocked()
@@ -305,7 +305,7 @@ func TestReplicatePeerStepsDownOnHigherTerm(t *testing.T) {
 }
 
 func TestAdvanceCommitIndexLockedCommitsOnMajorityAtCurrentTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2", "node-3", "node-4"}, nil)
+	n := NewNode("node-1", []string{"node-2", "node-3", "node-4"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 2}, {Term: 2}}
 	n.currentTerm = 2
 	n.role = Leader
@@ -319,7 +319,7 @@ func TestAdvanceCommitIndexLockedCommitsOnMajorityAtCurrentTerm(t *testing.T) {
 }
 
 func TestAdvanceCommitIndexLockedWithoutMajorityDoesNotCommit(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2", "node-3", "node-4"}, nil)
+	n := NewNode("node-1", []string{"node-2", "node-3", "node-4"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 2}, {Term: 2}}
 	n.currentTerm = 2
 	n.role = Leader
@@ -333,7 +333,7 @@ func TestAdvanceCommitIndexLockedWithoutMajorityDoesNotCommit(t *testing.T) {
 }
 
 func TestAdvanceCommitIndexLockedNeverCommitsAnEarlierTermEntryDirectly(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2", "node-3"}, nil)
+	n := NewNode("node-1", []string{"node-2", "node-3"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 1}}
 	n.currentTerm = 2
 	n.role = Leader

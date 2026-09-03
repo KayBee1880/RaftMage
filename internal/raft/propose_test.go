@@ -6,7 +6,7 @@ import (
 )
 
 func TestProposeRejectsWhenNotLeader(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, nil)
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
 
 	index, term, isLeader := n.Propose([]byte("x"))
 
@@ -22,7 +22,7 @@ func TestProposeRejectsWhenNotLeader(t *testing.T) {
 }
 
 func TestProposeAppendsToLeaderLogAndReturnsIndexTerm(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2"}, &fakeTransport{})
+	n := NewNode("node-1", []string{"node-2"}, &fakeTransport{}, nil)
 	n.currentTerm = 3
 	n.role = Leader
 	n.initLeaderStateLocked()
@@ -41,7 +41,7 @@ func TestProposeAppendsToLeaderLogAndReturnsIndexTerm(t *testing.T) {
 }
 
 func TestProposeOnSingleNodeClusterCommitsImmediately(t *testing.T) {
-	n := NewNode("node-1", nil, nil)
+	n := NewNode("node-1", nil, nil, nil)
 	n.StartElection()
 
 	index, _, isLeader := n.Propose([]byte("x"))
@@ -56,7 +56,7 @@ func TestProposeOnSingleNodeClusterCommitsImmediately(t *testing.T) {
 
 func TestProposeTriggersImmediateReplicationWithoutWaitingForHeartbeat(t *testing.T) {
 	transport := &fakeTransport{}
-	n := NewNode("node-1", []string{"node-2"}, transport)
+	n := NewNode("node-1", []string{"node-2"}, transport, nil)
 	n.currentTerm = 1
 	n.role = Leader
 	n.initLeaderStateLocked()
