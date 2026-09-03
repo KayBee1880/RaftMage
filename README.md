@@ -31,7 +31,7 @@ Principles this build has actually practiced — each one checkable against the 
 - **Reasoning is documented as "naive approach → why it breaks → the fix,"** not just "here's the code." Design docs and code-level rationale consistently explain why a simpler approach — a fixed (non-randomized) election timeout, or counting replicas without Raft's current-term-only commit rule — would be unsafe or livelock the cluster, before describing what's actually implemented.
 - **Safety is enforced at the core, not left to callers.** All node-state mutation goes through a single mutex-guarded path inside the `Node` type; a `*Locked` naming convention makes it explicit which internal functions assume the lock is already held, so correctness doesn't depend on every caller remembering to lock correctly.
 - **Deferred and rejected scope is stated explicitly, not silently absent.** [docs/architecture.md](docs/architecture.md) tracks Implemented vs. Planned per component; the Roadmap below does the same.
-- **Tests exercise real logic, not mocks pretending to be the system.** The network is the only thing faked (`fakeTransport` for unit tests, an in-process `loopbackTransport` for the multi-node integration test) — the actual consensus logic, including real goroutines, timers, and vote counting, runs for real.
+- **Tests exercise real logic, not mocks pretending to be the system.** Two things get faked where a test doesn't need the real thing — the network (`fakeTransport` for units, `loopbackTransport` for the multi-node integration tests) and, in most tests, persistence (`fakeStorage`) — but the consensus logic itself, including real goroutines, timers, vote counting, and log persistence, runs for real; the actual `FileStorage` implementation is tested directly against the filesystem, not just faked.
 - **CI runs the full suite with Go's race detector** (`go test ./... -race`) on every push and pull request — concurrency bugs are a CI gate, not something caught by hoping.
 
 ## What's actually working right now
@@ -42,13 +42,14 @@ Principles this build has actually practiced — each one checkable against the 
 - **Log replication (follower side)** — consistency checking against `PrevLogIndex`/`PrevLogTerm`, truncation of conflicting entries, idempotent handling of retried/duplicate RPCs, and commit-index advancement bounded by what's actually stored locally.
 - **Log replication (leader side)** — per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
 - **Client-facing write API (`Propose`)** — the first way to actually get a write into the cluster: rejected outright on a non-leader (`isLeader == false`, so a client knows to look elsewhere), otherwise appended to the leader's log and replicated immediately rather than waiting for the next 50ms heartbeat tick. A single-node cluster commits its own proposal instantly, since the leader alone is already a majority.
-- **40 tests, all passing**, run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Crash recovery** — `currentTerm`, `votedFor`, and the log are persisted to disk (`FileStorage`, an atomic JSON snapshot per write — temp file + `fsync` + rename, so a crash mid-write can never corrupt the on-disk state) before a node responds to any RPC that depends on that state surviving a restart: granting a vote, replicating an entry, or accepting a client's `Propose`. A restarted node reloads its term, vote, and log from disk instead of starting blank, which is what actually makes it safe to keep participating in the cluster afterward rather than risking a repeated vote or a forgotten entry.
+- **50 tests, all passing** — 46 in `internal/raft`, 4 in `internal/storage` — run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner — there is no standalone server binary or client yet. See Roadmap.
 
 ## Architecture
 
-**Current state** — what's really running today. No client, no real network, no standalone process: `Node` instances talk to each other only through an in-process `Transport` implementation, orchestrated entirely by Go's test runner.
+**Current state** — what's really running today. No client, no real network, no standalone process: `Node` instances talk to each other only through an in-process `Transport` implementation and persist through a real `Storage` implementation, orchestrated entirely by Go's test runner.
 
 ```mermaid
 graph LR
@@ -58,9 +59,13 @@ graph LR
         N3["Node"]
     end
     TP["Transport interface<br/>(fakeTransport in unit tests,<br/>loopbackTransport in the integration test)"]
+    ST["Storage interface<br/>(fakeStorage in most tests,<br/>real FileStorage where persistence is tested)"]
     N1 --> TP
     N2 --> TP
     N3 --> TP
+    N1 --> ST
+    N2 --> ST
+    N3 --> ST
 ```
 
 **Target state** — the eventual system this is building toward. Not yet built; shown for direction, not to claim it exists.
@@ -100,7 +105,6 @@ graph TB
 | Component | Milestone |
 |---|---|
 | gRPC + Protocol Buffers | Real network transport |
-| Custom write-ahead log | Persistence & crash recovery |
 | Log compaction | Snapshotting |
 | Deterministic simulation harness (fault injection) | Correctness testing under partitions/crashes |
 | Structured logs + metrics | Observability |
@@ -114,8 +118,8 @@ graph TB
 - [x] Log replication — follower side (consistency check, append/truncate, commit index)
 - [x] Log replication — leader side (`nextIndex`/`matchIndex`, retry, commit advancement)
 - [x] Client-facing write API (`Propose`)
-- [ ] **Persistent write-ahead log + crash recovery** ← current
-- [ ] Snapshotting + log compaction
+- [x] Persistent write-ahead log + crash recovery
+- [ ] **Snapshotting + log compaction** ← current
 - [ ] Real gRPC transport
 - [ ] Cluster membership changes
 - [ ] Deterministic simulation / fault-injection testing
@@ -139,14 +143,18 @@ raftmage/
 ├── .github/workflows/
 │   └── ci.yml
 └── internal/
-    └── raft/                    # the only package that exists — the consensus core
-        ├── raft.go              # Node state: roles, terms, log
-        ├── election.go          # RequestVote RPC, leader election
-        ├── election_timer.go    # randomized election-timeout loop
-        ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (both sides)
-        ├── propose.go           # Propose — the client-facing write API
-        ├── transport.go         # Transport interface — the network dependency-inversion boundary
-        └── *_test.go            # 40 tests, including two 3-node integration tests
+    ├── raft/                    # the consensus core
+    │   ├── raft.go              # Node state: roles, terms, log
+    │   ├── election.go          # RequestVote RPC, leader election
+    │   ├── election_timer.go    # randomized election-timeout loop
+    │   ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (both sides)
+    │   ├── propose.go           # Propose — the client-facing write API
+    │   ├── transport.go         # Transport interface — the network dependency-inversion boundary
+    │   ├── storage.go           # Storage interface — the persistence dependency-inversion boundary
+    │   └── *_test.go            # 46 tests, including two 3-node integration tests
+    └── storage/                 # the real, disk-backed Storage implementation
+        ├── file_storage.go      # FileStorage — atomic JSON-snapshot persistence to disk
+        └── file_storage_test.go # 4 tests
 ```
 
 No `cmd/` entrypoint yet — there is nothing to `go run`. See Roadmap.
