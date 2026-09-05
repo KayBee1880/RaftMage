@@ -9,51 +9,52 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)](docs/architecture.md)
 
-*Every claim in this README is either true right now — verifiable with the commands below — or explicitly marked planned.*
+*Every claim in this README is either true right now (verifiable with the commands below) or explicitly marked planned.*
 
 </div>
 
 ## What this is
 
-RaftMage is a small, from-scratch distributed key-value store. For infrastructure like this, the `Get`/`Put`/`Delete` API isn't really the product — the guarantee behind it is: that a write the cluster acknowledges survives node crashes, leader failures, and network partitions without being lost or silently contradicted. Raft, the consensus algorithm this project implements from first principles, is what makes that guarantee real instead of aspirational. Everything here is built and tested to prove the guarantee holds, not just to look like it does.
+RaftMage is a small, from-scratch distributed key-value store. For infrastructure like this, the `Get`/`Put`/`Delete` API isn't really the product; the guarantee behind it is the product: that a write the cluster acknowledges survives node crashes, leader failures, and network partitions without being lost or silently contradicted. Raft, the consensus algorithm this project implements from first principles, is what makes that guarantee real instead of aspirational. Everything here is built and tested to prove the guarantee holds, not just to look like it does.
 
 ## Why this project exists
 
-A single-node key-value store is easy. Making it survive a crash without losing data, or without serving stale or contradictory answers during a leader failure or network partition, is the actual problem distributed databases exist to solve — and it's provably impossible to solve perfectly, only to engineer a deliberate, defensible tradeoff for. RaftMage exists to build and prove one specific, well-understood answer to that problem at a small enough scale that every line of the consensus logic can be read, tested, and explained.
+A single-node key-value store is easy. Making it survive a crash without losing data, or without serving stale or contradictory answers during a leader failure or network partition, is the actual problem distributed databases exist to solve, and it's provably impossible to solve perfectly, only to engineer a deliberate, defensible tradeoff for. RaftMage exists to build and prove one specific, well-understood answer to that problem at a small enough scale that every line of the consensus logic can be read, tested, and explained.
 
 See [docs/architecture.md](docs/architecture.md) for the full design rationale, including why Raft was chosen and how the pieces fit together.
 
 ## Engineering approach
 
-Principles this build has actually practiced — each one checkable against the commit history or the code itself, not aspirational:
+Principles this build has actually practiced, each one checkable against the commit history or the code itself, not aspirational:
 
 - **No invented numbers.** Every count in this README (tests, components) comes straight from running `go test`/reading the code, not an estimate.
-- **Reasoning is documented as "naive approach → why it breaks → the fix,"** not just "here's the code." Design docs and code-level rationale consistently explain why a simpler approach — a fixed (non-randomized) election timeout, or counting replicas without Raft's current-term-only commit rule — would be unsafe or livelock the cluster, before describing what's actually implemented.
+- **Reasoning is documented as "naive approach → why it breaks → the fix,"** not just "here's the code." Design docs and code-level rationale consistently explain why a simpler approach, such as a fixed (non-randomized) election timeout, or counting replicas without Raft's current-term-only commit rule, would be unsafe or livelock the cluster, before describing what's actually implemented.
 - **Safety is enforced at the core, not left to callers.** All node-state mutation goes through a single mutex-guarded path inside the `Node` type; a `*Locked` naming convention makes it explicit which internal functions assume the lock is already held, so correctness doesn't depend on every caller remembering to lock correctly.
 - **Deferred and rejected scope is stated explicitly, not silently absent.** [docs/architecture.md](docs/architecture.md) tracks Implemented vs. Planned per component; the Roadmap below does the same.
-- **Tests exercise real logic, not mocks pretending to be the system.** Two things get faked where a test doesn't need the real thing — the network (`fakeTransport` for units, `loopbackTransport` for the multi-node integration tests) and, in most tests, persistence (`fakeStorage`) — but the consensus logic itself, including real goroutines, timers, vote counting, and log persistence, runs for real; the actual `FileStorage` implementation is tested directly against the filesystem, not just faked.
-- **CI runs the full suite with Go's race detector** (`go test ./... -race`) on every push and pull request — concurrency bugs are a CI gate, not something caught by hoping.
+- **Tests exercise real logic, not mocks pretending to be the system.** Two things get faked where a test doesn't need the real thing: the network (`fakeTransport` for units, `loopbackTransport` for the multi-node integration tests) and, in most tests, persistence (`fakeStorage`). The consensus logic itself, including real goroutines, timers, vote counting, and log persistence, runs for real; the actual `FileStorage` implementation is tested directly against the filesystem, not just faked.
+- **CI runs the full suite with Go's race detector** (`go test ./... -race`) on every push and pull request; concurrency bugs are a CI gate, not something caught by hoping.
 
 ## What's actually working right now
 
 - **Leader election** (`RequestVote` RPC) implementing Raft's full safety rules: one vote per term, and a candidate's log must be at least as up to date as the voter's before it gets a vote.
-- **Automatic elections** — a randomized election-timeout loop (150–300ms per node) that triggers a new election with no manual intervention, specifically to avoid every node timing out simultaneously and splitting the vote forever.
-- **Leader liveness** — `AppendEntries` heartbeats every 50ms that keep a healthy elected leader in power. Proven with three real `Node` instances in a genuine election, not just asserted: `TestLeaderHeartbeatsPreventFollowerReelection`.
-- **Log replication (follower side)** — consistency checking against `PrevLogIndex`/`PrevLogTerm`, truncation of conflicting entries, idempotent handling of retried/duplicate RPCs, and commit-index advancement bounded by what's actually stored locally.
-- **Log replication (leader side)** — per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
-- **Client-facing write API (`Propose`)** — the first way to actually get a write into the cluster: rejected outright on a non-leader (`isLeader == false`, so a client knows to look elsewhere), otherwise appended to the leader's log and replicated immediately rather than waiting for the next 50ms heartbeat tick. A single-node cluster commits its own proposal instantly, since the leader alone is already a majority.
-- **Crash recovery** — `currentTerm`, `votedFor`, and the log are persisted to disk (`FileStorage`, an atomic JSON snapshot per write — temp file + `fsync` + rename, so a crash mid-write can never corrupt the on-disk state) before a node responds to any RPC that depends on that state surviving a restart: granting a vote, replicating an entry, or accepting a client's `Propose`. A restarted node reloads its term, vote, and log from disk instead of starting blank, which is what actually makes it safe to keep participating in the cluster afterward rather than risking a repeated vote or a forgotten entry.
-- **50 tests, all passing** — 46 in `internal/raft`, 4 in `internal/storage` — run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Automatic elections**: a randomized election-timeout loop (150–300ms per node) that triggers a new election with no manual intervention, specifically to avoid every node timing out simultaneously and splitting the vote forever.
+- **Leader liveness**: `AppendEntries` heartbeats every 50ms that keep a healthy elected leader in power. Proven with three real `Node` instances in a genuine election, not just asserted: `TestLeaderHeartbeatsPreventFollowerReelection`.
+- **Log replication (follower side)**: consistency checking against `PrevLogIndex`/`PrevLogTerm`, truncation of conflicting entries, idempotent handling of retried/duplicate RPCs, and commit-index advancement bounded by what's actually stored locally.
+- **Log replication (leader side)**: per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
+- **Client-facing write API (`Propose`)**: the first way to actually get a write into the cluster. Rejected outright on a non-leader (`isLeader == false`, so a client knows to look elsewhere), otherwise appended to the leader's log and replicated immediately rather than waiting for the next 50ms heartbeat tick. A single-node cluster commits its own proposal instantly, since the leader alone is already a majority.
+- **Crash recovery**: `currentTerm`, `votedFor`, and the log are persisted to disk (`FileStorage`, an atomic JSON snapshot per write, using a temp file, `fsync`, and rename, so a crash mid-write can never corrupt the on-disk state) before a node responds to any RPC that depends on that state surviving a restart: granting a vote, replicating an entry, or accepting a client's `Propose`. A restarted node reloads its term, vote, and log from disk instead of starting blank, which is what actually makes it safe to keep participating in the cluster afterward rather than risking a repeated vote or a forgotten entry.
+- **Log compaction (`Node.Compact`)**: trims committed log entries a node no longer needs to keep in memory or on disk, replacing them with a `(lastIncludedIndex, lastIncludedTerm)` boundary the rest of the code treats as a normal (if unusually old) log position. Deliberately scoped: a leader may only compact up to the *slowest* follower's confirmed `matchIndex`, never past it, which means every follower can always be caught up with ordinary `AppendEntries`, so this slice needed no `InstallSnapshot` RPC to stay safe. That's a real, stated tradeoff, not an oversight: a follower that falls far enough behind (or is offline) simply blocks further compaction rather than risking being stranded. There's also still no state machine, so a "snapshot" here is log metadata only, not a serialized KV-store snapshot; see [docs/architecture.md](docs/architecture.md) for the honest boundary. Proven end-to-end with three real nodes: `TestLeaderCompactsLogSafelyWithoutStrandingFollowers`.
+- **60 tests, all passing** (56 in `internal/raft`, 4 in `internal/storage`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
-Everything above runs today only inside Go's test runner — there is no standalone server binary or client yet. See Roadmap.
+Everything above runs today only inside Go's test runner; there is no standalone server binary or client yet. See Roadmap.
 
 ## Architecture
 
-**Current state** — what's really running today. No client, no real network, no standalone process: `Node` instances talk to each other only through an in-process `Transport` implementation and persist through a real `Storage` implementation, orchestrated entirely by Go's test runner.
+**Current state**: what's really running today. No client, no real network, no standalone process. `Node` instances talk to each other only through an in-process `Transport` implementation and persist through a real `Storage` implementation, orchestrated entirely by Go's test runner.
 
 ```mermaid
 graph LR
-    subgraph "Driven entirely by Go tests — no standalone binary yet"
+    subgraph "Driven entirely by Go tests, no standalone binary yet"
         N1["Node"]
         N2["Node"]
         N3["Node"]
@@ -68,7 +69,7 @@ graph LR
     N3 --> ST
 ```
 
-**Target state** — the eventual system this is building toward. Not yet built; shown for direction, not to claim it exists.
+**Target state**: the eventual system this is building toward. Not yet built; shown for direction, not to claim it exists.
 
 ```mermaid
 graph TB
@@ -105,7 +106,7 @@ graph TB
 | Component | Milestone |
 |---|---|
 | gRPC + Protocol Buffers | Real network transport |
-| Log compaction | Snapshotting |
+| `InstallSnapshot` RPC | Catching up a far-behind follower past a leader's compaction point |
 | Deterministic simulation harness (fault injection) | Correctness testing under partitions/crashes |
 | Structured logs + metrics | Observability |
 
@@ -115,11 +116,12 @@ graph TB
 - [x] Leader election (`RequestVote` RPC, full safety rules)
 - [x] Randomized election-timeout loop (automatic elections)
 - [x] `AppendEntries` heartbeats (leader liveness)
-- [x] Log replication — follower side (consistency check, append/truncate, commit index)
-- [x] Log replication — leader side (`nextIndex`/`matchIndex`, retry, commit advancement)
+- [x] Log replication, follower side (consistency check, append/truncate, commit index)
+- [x] Log replication, leader side (`nextIndex`/`matchIndex`, retry, commit advancement)
 - [x] Client-facing write API (`Propose`)
 - [x] Persistent write-ahead log + crash recovery
-- [ ] **Snapshotting + log compaction** ← current
+- [x] Log compaction (leader-conservative, bounded by follower `matchIndex`; no `InstallSnapshot` needed for this slice)
+- [ ] **`InstallSnapshot` RPC (catch up a follower that's fallen behind the compaction point)** ← current
 - [ ] Real gRPC transport
 - [ ] Cluster membership changes
 - [ ] Deterministic simulation / fault-injection testing
@@ -130,7 +132,7 @@ Fuller status, including what's implemented vs. planned per component: [docs/arc
 
 ## Repository structure
 
-Reflects the actual current tree — nothing listed here that doesn't exist yet.
+Reflects the actual current tree; nothing listed here that doesn't exist yet.
 
 ```
 raftmage/
@@ -148,16 +150,17 @@ raftmage/
     │   ├── election.go          # RequestVote RPC, leader election
     │   ├── election_timer.go    # randomized election-timeout loop
     │   ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (both sides)
-    │   ├── propose.go           # Propose — the client-facing write API
-    │   ├── transport.go         # Transport interface — the network dependency-inversion boundary
-    │   ├── storage.go           # Storage interface — the persistence dependency-inversion boundary
-    │   └── *_test.go            # 46 tests, including two 3-node integration tests
+    │   ├── propose.go           # Propose: the client-facing write API
+    │   ├── compact.go           # Node.Compact: leader-conservative log compaction
+    │   ├── transport.go         # Transport interface: the network dependency-inversion boundary
+    │   ├── storage.go           # Storage interface: the persistence dependency-inversion boundary
+    │   └── *_test.go            # 56 tests, including three 3-node integration tests
     └── storage/                 # the real, disk-backed Storage implementation
-        ├── file_storage.go      # FileStorage — atomic JSON-snapshot persistence to disk
+        ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
         └── file_storage_test.go # 4 tests
 ```
 
-No `cmd/` entrypoint yet — there is nothing to `go run`. See Roadmap.
+No `cmd/` entrypoint yet; there is nothing to `go run`. See Roadmap.
 
 ## Local setup
 
@@ -177,18 +180,19 @@ make vet
 make test
 ```
 
-`make race` / `go test ./... -race` requires a cgo-capable toolchain — works in CI, may not work on every local machine.
+`make race` / `go test ./... -race` requires a cgo-capable toolchain. Works in CI, may not work on every local machine.
 
-The closest thing to a running demo right now — three real nodes electing a leader, staying stable under it, and replicating and committing a real client write via `Propose`, end to end:
+The closest thing to a running demo right now: three real nodes electing a leader, staying stable under it, and replicating and committing a real client write via `Propose`, end to end:
 
 ```
 go test ./internal/raft -run TestLeaderHeartbeatsPreventFollowerReelection -v
 go test ./internal/raft -run TestLeaderReplicatesAndCommitsAcrossRealNodes -v
+go test ./internal/raft -run TestLeaderCompactsLogSafelyWithoutStrandingFollowers -v
 ```
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — system design, component status, and diagrams.
+- [docs/architecture.md](docs/architecture.md): system design, component status, and diagrams.
 
 ## License
 
