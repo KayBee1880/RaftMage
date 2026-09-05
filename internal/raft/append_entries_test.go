@@ -193,6 +193,48 @@ func TestHandleAppendEntriesCommitIndexBoundedByLocalLog(t *testing.T) {
 	}
 }
 
+func TestHandleAppendEntriesAcceptsPrevLogIndexAtCompactionBoundary(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
+	n.log = []LogEntry{{Term: 1}}
+	n.commitIndex = 1
+	if err := n.Compact(1); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         1,
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		Entries:      []LogEntry{{Term: 1, Command: []byte("c")}},
+	})
+
+	if !reply.Success {
+		t.Fatalf("expected success: PrevLogIndex/PrevLogTerm exactly match the compaction boundary")
+	}
+	if len(n.log) != 1 || string(n.log[0].Command) != "c" {
+		t.Fatalf("log = %+v, want one entry {Term:1 Command:\"c\"}", n.log)
+	}
+}
+
+func TestHandleAppendEntriesRejectsPrevLogIndexBeforeCompactionBoundary(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
+	n.log = []LogEntry{{Term: 1}, {Term: 2}}
+	n.commitIndex = 2
+	if err := n.Compact(2); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	reply := n.HandleAppendEntries(AppendEntriesArgs{
+		Term:         2,
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+	})
+
+	if reply.Success {
+		t.Fatalf("expected rejection: PrevLogIndex is before the compaction boundary and can't be verified")
+	}
+}
+
 func TestInitLeaderStateLockedStartsNextIndexAtOwnLogEnd(t *testing.T) {
 	n := NewNode("node-1", []string{"node-2", "node-3"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 1}}

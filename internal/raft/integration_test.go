@@ -138,3 +138,81 @@ func TestLeaderReplicatesAndCommitsAcrossRealNodes(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestLeaderCompactsLogSafelyWithoutStrandingFollowers(t *testing.T) {
+	transport := newLoopbackTransport()
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
+	nodes := []*Node{n1, n2, n3}
+
+	for _, n := range nodes {
+		transport.register(n)
+	}
+	for _, n := range nodes {
+		n.Run()
+	}
+	defer func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	}()
+
+	leader := waitForAnyLeader(t, nodes, 2*time.Second)
+
+	for i := 0; i < 3; i++ {
+		if _, _, isLeader := leader.Propose([]byte("entry")); !isLeader {
+			t.Fatalf("Propose #%d on the elected leader reported isLeader = false", i)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		allCommitted := true
+		for _, n := range nodes {
+			n.mu.Lock()
+			committed := n.commitIndex == 3
+			n.mu.Unlock()
+			if !committed {
+				allCommitted = false
+				break
+			}
+		}
+		if allCommitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not every node committed all 3 entries within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := leader.Compact(2); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	if _, _, isLeader := leader.Propose([]byte("post-compaction entry")); !isLeader {
+		t.Fatalf("Propose after compaction reported isLeader = false")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		allCaughtUp := true
+		for _, n := range nodes {
+			n.mu.Lock()
+			caughtUp := n.commitIndex == 4 && n.lastLogIndexLocked() == 4
+			n.mu.Unlock()
+			if !caughtUp {
+				allCaughtUp = false
+				break
+			}
+		}
+		if allCaughtUp {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not every node caught up on the post-compaction entry within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

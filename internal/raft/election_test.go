@@ -45,10 +45,10 @@ func (f *fakeTransport) SendAppendEntries(peer string, args AppendEntriesArgs) (
 var errSimulatedStorageFailure = errors.New("simulated storage failure")
 
 type fakeStorage struct {
-	mu       sync.Mutex
-	saved    []PersistentState
-	loadErr  error
-	saveErr  error
+	mu      sync.Mutex
+	saved   []PersistentState
+	loadErr error
+	saveErr error
 }
 
 func (f *fakeStorage) Save(state PersistentState) error {
