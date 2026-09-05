@@ -46,6 +46,9 @@ type Node struct {
 	votedFor    string
 	log         []LogEntry
 
+	lastIncludedIndex uint64
+	lastIncludedTerm  uint64
+
 	commitIndex uint64
 	lastApplied uint64
 
@@ -79,6 +82,8 @@ func NewNode(id string, peers []string, transport Transport, storage Storage) *N
 		n.currentTerm = state.CurrentTerm
 		n.votedFor = state.VotedFor
 		n.log = state.Log
+		n.lastIncludedIndex = state.LastIncludedIndex
+		n.lastIncludedTerm = state.LastIncludedTerm
 	}
 
 	return n
@@ -89,9 +94,11 @@ func (n *Node) persistStateLocked() {
 		return
 	}
 	state := PersistentState{
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
-		Log:         n.log,
+		CurrentTerm:       n.currentTerm,
+		VotedFor:          n.votedFor,
+		Log:               n.log,
+		LastIncludedIndex: n.lastIncludedIndex,
+		LastIncludedTerm:  n.lastIncludedTerm,
 	}
 	if err := n.storage.Save(state); err != nil {
 		panic("raft: failed to persist state: " + err.Error())
@@ -117,7 +124,7 @@ func (n *Node) VotedFor() string {
 }
 
 func (n *Node) lastLogIndexLocked() uint64 {
-	return uint64(len(n.log))
+	return n.lastIncludedIndex + uint64(len(n.log))
 }
 
 func (n *Node) lastLogTermLocked() uint64 {
@@ -128,5 +135,8 @@ func (n *Node) logTermAtLocked(index uint64) uint64 {
 	if index == 0 {
 		return 0
 	}
-	return n.log[index-1].Term
+	if index == n.lastIncludedIndex {
+		return n.lastIncludedTerm
+	}
+	return n.log[index-n.lastIncludedIndex-1].Term
 }

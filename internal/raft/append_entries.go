@@ -31,10 +31,8 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	}
 	n.electionResetAt = time.Now()
 
-	if args.PrevLogIndex > 0 {
-		if args.PrevLogIndex > n.lastLogIndexLocked() || n.logTermAtLocked(args.PrevLogIndex) != args.PrevLogTerm {
-			return AppendEntriesReply{Term: n.currentTerm, Success: false}
-		}
+	if args.PrevLogIndex < n.lastIncludedIndex || args.PrevLogIndex > n.lastLogIndexLocked() || n.logTermAtLocked(args.PrevLogIndex) != args.PrevLogTerm {
+		return AppendEntriesReply{Term: n.currentTerm, Success: false}
 	}
 
 	n.appendNewEntriesLocked(args.PrevLogIndex, args.Entries)
@@ -51,12 +49,12 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 
 func (n *Node) appendNewEntriesLocked(prevLogIndex uint64, entries []LogEntry) {
 	for i, entry := range entries {
-		logIndex := prevLogIndex + uint64(i)
-		if logIndex < uint64(len(n.log)) {
-			if n.log[logIndex].Term == entry.Term {
+		sliceIndex := prevLogIndex + uint64(i) - n.lastIncludedIndex
+		if sliceIndex < uint64(len(n.log)) {
+			if n.log[sliceIndex].Term == entry.Term {
 				continue
 			}
-			n.log = n.log[:logIndex]
+			n.log = n.log[:sliceIndex]
 		}
 		n.log = append(n.log, entries[i:]...)
 		return
@@ -117,7 +115,7 @@ func (n *Node) replicatePeer(term uint64, peer string) {
 			LeaderID:     n.id,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  n.logTermAtLocked(prevLogIndex),
-			Entries:      append([]LogEntry(nil), n.log[prevLogIndex:]...),
+			Entries:      append([]LogEntry(nil), n.log[prevLogIndex-n.lastIncludedIndex:]...),
 			LeaderCommit: n.commitIndex,
 		}
 		transport := n.transport
