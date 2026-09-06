@@ -3,7 +3,6 @@ package raft
 import "errors"
 
 var ErrCompactPastCommitIndex = errors.New("raft: cannot compact past commitIndex")
-var ErrCompactPastFollowerMatchIndex = errors.New("raft: cannot compact past a follower's matchIndex")
 
 func (n *Node) Compact(upToIndex uint64) error {
 	n.mu.Lock()
@@ -14,13 +13,6 @@ func (n *Node) Compact(upToIndex uint64) error {
 	}
 	if upToIndex > n.commitIndex {
 		return ErrCompactPastCommitIndex
-	}
-	if n.role == Leader {
-		for _, peer := range n.peers {
-			if n.matchIndex[peer] < upToIndex {
-				return ErrCompactPastFollowerMatchIndex
-			}
-		}
 	}
 
 	lastIncludedTerm := n.logTermAtLocked(upToIndex)

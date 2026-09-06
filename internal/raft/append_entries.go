@@ -109,6 +109,13 @@ func (n *Node) replicatePeer(term uint64, peer string) {
 			n.mu.Unlock()
 			return
 		}
+		if n.nextIndex[peer]-1 < n.lastIncludedIndex {
+			n.mu.Unlock()
+			if !n.sendInstallSnapshot(term, peer) {
+				return
+			}
+			continue
+		}
 		prevLogIndex := n.nextIndex[peer] - 1
 		args := AppendEntriesArgs{
 			Term:         term,
@@ -148,6 +155,45 @@ func (n *Node) replicatePeer(term uint64, peer string) {
 		}
 		n.mu.Unlock()
 	}
+}
+
+func (n *Node) sendInstallSnapshot(term uint64, peer string) bool {
+	n.mu.Lock()
+	if n.role != Leader || n.currentTerm != term {
+		n.mu.Unlock()
+		return false
+	}
+	args := InstallSnapshotArgs{
+		Term:              term,
+		LeaderID:          n.id,
+		LastIncludedIndex: n.lastIncludedIndex,
+		LastIncludedTerm:  n.lastIncludedTerm,
+	}
+	transport := n.transport
+	n.mu.Unlock()
+
+	reply, err := transport.SendInstallSnapshot(peer, args)
+	if err != nil {
+		return false
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.role != Leader || n.currentTerm != term {
+		return false
+	}
+	if reply.Term > n.currentTerm {
+		n.becomeFollowerLocked(reply.Term)
+		return false
+	}
+	if n.matchIndex[peer] < args.LastIncludedIndex {
+		n.matchIndex[peer] = args.LastIncludedIndex
+	}
+	if n.nextIndex[peer] < args.LastIncludedIndex+1 {
+		n.nextIndex[peer] = args.LastIncludedIndex + 1
+	}
+	n.advanceCommitIndexLocked(term)
+	return true
 }
 
 func (n *Node) advanceCommitIndexLocked(term uint64) {
