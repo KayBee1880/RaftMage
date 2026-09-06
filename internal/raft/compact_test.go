@@ -43,28 +43,13 @@ func TestCompactRejectsUncommittedIndex(t *testing.T) {
 	}
 }
 
-func TestCompactRejectsPastFollowerMatchIndexOnLeader(t *testing.T) {
+func TestCompactSucceedsEvenWithAFarBehindFollower(t *testing.T) {
 	n := NewNode("node-1", []string{"node-2", "node-3"}, nil, nil)
 	n.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
 	n.currentTerm = 1
 	n.role = Leader
 	n.commitIndex = 3
-	n.matchIndex = map[string]uint64{"node-2": 3, "node-3": 1}
-
-	err := n.Compact(2)
-
-	if err != ErrCompactPastFollowerMatchIndex {
-		t.Fatalf("err = %v, want ErrCompactPastFollowerMatchIndex", err)
-	}
-}
-
-func TestCompactAllowsUpToMinMatchIndexOnLeader(t *testing.T) {
-	n := NewNode("node-1", []string{"node-2", "node-3"}, nil, nil)
-	n.log = []LogEntry{{Term: 1}, {Term: 1}, {Term: 1}}
-	n.currentTerm = 1
-	n.role = Leader
-	n.commitIndex = 3
-	n.matchIndex = map[string]uint64{"node-2": 3, "node-3": 2}
+	n.matchIndex = map[string]uint64{"node-2": 3, "node-3": 0}
 
 	if err := n.Compact(2); err != nil {
 		t.Fatalf("Compact failed: %v", err)
@@ -116,6 +101,45 @@ func TestCompactedStatePersistsAndRecoversAcrossRestart(t *testing.T) {
 	}
 	if got := after.lastLogIndexLocked(); got != 2 {
 		t.Errorf("lastLogIndexLocked() after restart = %d, want 2", got)
+	}
+}
+
+func TestReplicatePeerSendsInstallSnapshotWhenPeerBehindCompactionBoundary(t *testing.T) {
+	transport := &fakeTransport{}
+	n := NewNode("node-1", []string{"node-2"}, transport, nil)
+	n.log = []LogEntry{{Term: 1, Command: []byte("a")}, {Term: 1, Command: []byte("b")}, {Term: 1, Command: []byte("c")}}
+	n.currentTerm = 1
+	n.role = Leader
+	n.commitIndex = 3
+	n.initLeaderStateLocked()
+	if err := n.Compact(2); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+	n.nextIndex["node-2"] = 1
+
+	n.replicatePeer(1, "node-2")
+
+	if len(transport.installSnapshotLog) != 1 {
+		t.Fatalf("expected 1 InstallSnapshot call, got %d", len(transport.installSnapshotLog))
+	}
+	sent := transport.installSnapshotLog[0]
+	if sent.LastIncludedIndex != 2 || sent.LastIncludedTerm != 1 {
+		t.Errorf("LastIncludedIndex/LastIncludedTerm = %d/%d, want 2/1", sent.LastIncludedIndex, sent.LastIncludedTerm)
+	}
+
+	if len(transport.appendEntriesLog) != 1 {
+		t.Fatalf("expected 1 follow-up AppendEntries call, got %d", len(transport.appendEntriesLog))
+	}
+	followUp := transport.appendEntriesLog[0]
+	if followUp.PrevLogIndex != 2 || len(followUp.Entries) != 1 || string(followUp.Entries[0].Command) != "c" {
+		t.Fatalf("follow-up AppendEntries = %+v, want PrevLogIndex=2 with one entry {Command:\"c\"}", followUp)
+	}
+
+	if n.matchIndex["node-2"] != 3 {
+		t.Errorf("matchIndex = %d, want 3 (fully caught up after InstallSnapshot plus the follow-up AppendEntries)", n.matchIndex["node-2"])
+	}
+	if n.nextIndex["node-2"] != 4 {
+		t.Errorf("nextIndex = %d, want 4", n.nextIndex["node-2"])
 	}
 }
 

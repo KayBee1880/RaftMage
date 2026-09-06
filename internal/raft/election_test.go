@@ -13,8 +13,11 @@ type fakeTransport struct {
 	appendEntriesFn func(peer string, args AppendEntriesArgs) (AppendEntriesReply, error)
 	appendReplies   map[string]AppendEntriesReply
 
-	mu               sync.Mutex
-	appendEntriesLog []AppendEntriesArgs
+	installSnapshotFn func(peer string, args InstallSnapshotArgs) (InstallSnapshotReply, error)
+
+	mu                 sync.Mutex
+	appendEntriesLog   []AppendEntriesArgs
+	installSnapshotLog []InstallSnapshotArgs
 }
 
 func (f *fakeTransport) SendRequestVote(peer string, args RequestVoteArgs) (RequestVoteReply, error) {
@@ -40,6 +43,21 @@ func (f *fakeTransport) SendAppendEntries(peer string, args AppendEntriesArgs) (
 		return reply, nil
 	}
 	return AppendEntriesReply{Term: args.Term, Success: true}, nil
+}
+
+func (f *fakeTransport) SendInstallSnapshot(peer string, args InstallSnapshotArgs) (InstallSnapshotReply, error) {
+	if f.errPeer[peer] {
+		return InstallSnapshotReply{}, errors.New("simulated network error")
+	}
+
+	f.mu.Lock()
+	f.installSnapshotLog = append(f.installSnapshotLog, args)
+	f.mu.Unlock()
+
+	if f.installSnapshotFn != nil {
+		return f.installSnapshotFn(peer, args)
+	}
+	return InstallSnapshotReply{Term: args.Term}, nil
 }
 
 var errSimulatedStorageFailure = errors.New("simulated storage failure")

@@ -8,12 +8,16 @@ import (
 )
 
 type loopbackTransport struct {
-	mu    sync.Mutex
-	nodes map[string]*Node
+	mu           sync.Mutex
+	nodes        map[string]*Node
+	disconnected map[string]bool
 }
 
 func newLoopbackTransport() *loopbackTransport {
-	return &loopbackTransport{nodes: make(map[string]*Node)}
+	return &loopbackTransport{
+		nodes:        make(map[string]*Node),
+		disconnected: make(map[string]bool),
+	}
 }
 
 func (lt *loopbackTransport) register(n *Node) {
@@ -22,10 +26,26 @@ func (lt *loopbackTransport) register(n *Node) {
 	lt.nodes[n.id] = n
 }
 
+func (lt *loopbackTransport) disconnect(peer string) {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	lt.disconnected[peer] = true
+}
+
+func (lt *loopbackTransport) reconnect(peer string) {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	delete(lt.disconnected, peer)
+}
+
 func (lt *loopbackTransport) SendRequestVote(peer string, args RequestVoteArgs) (RequestVoteReply, error) {
 	lt.mu.Lock()
 	n, ok := lt.nodes[peer]
+	unreachable := lt.disconnected[peer]
 	lt.mu.Unlock()
+	if unreachable {
+		return RequestVoteReply{}, errors.New("peer unreachable: " + peer)
+	}
 	if !ok {
 		return RequestVoteReply{}, errors.New("unknown peer: " + peer)
 	}
@@ -35,11 +55,29 @@ func (lt *loopbackTransport) SendRequestVote(peer string, args RequestVoteArgs) 
 func (lt *loopbackTransport) SendAppendEntries(peer string, args AppendEntriesArgs) (AppendEntriesReply, error) {
 	lt.mu.Lock()
 	n, ok := lt.nodes[peer]
+	unreachable := lt.disconnected[peer]
 	lt.mu.Unlock()
+	if unreachable {
+		return AppendEntriesReply{}, errors.New("peer unreachable: " + peer)
+	}
 	if !ok {
 		return AppendEntriesReply{}, errors.New("unknown peer: " + peer)
 	}
 	return n.HandleAppendEntries(args), nil
+}
+
+func (lt *loopbackTransport) SendInstallSnapshot(peer string, args InstallSnapshotArgs) (InstallSnapshotReply, error) {
+	lt.mu.Lock()
+	n, ok := lt.nodes[peer]
+	unreachable := lt.disconnected[peer]
+	lt.mu.Unlock()
+	if unreachable {
+		return InstallSnapshotReply{}, errors.New("peer unreachable: " + peer)
+	}
+	if !ok {
+		return InstallSnapshotReply{}, errors.New("unknown peer: " + peer)
+	}
+	return n.HandleInstallSnapshot(args), nil
 }
 
 func waitForAnyLeader(t *testing.T, nodes []*Node, timeout time.Duration) *Node {
@@ -212,6 +250,100 @@ func TestLeaderCompactsLogSafelyWithoutStrandingFollowers(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("not every node caught up on the post-compaction entry within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestLeaderInstallsSnapshotToCatchUpFarBehindFollower(t *testing.T) {
+	transport := newLoopbackTransport()
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
+	nodes := []*Node{n1, n2, n3}
+
+	for _, n := range nodes {
+		transport.register(n)
+	}
+	for _, n := range nodes {
+		n.Run()
+	}
+	defer func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	}()
+
+	leader := waitForAnyLeader(t, nodes, 2*time.Second)
+
+	var behind *Node
+	for _, n := range nodes {
+		if n != leader {
+			behind = n
+			break
+		}
+	}
+
+	transport.disconnect(behind.id)
+	defer transport.reconnect(behind.id)
+
+	for i := 0; i < 3; i++ {
+		if _, _, isLeader := leader.Propose([]byte("entry")); !isLeader {
+			t.Fatalf("Propose #%d on the elected leader reported isLeader = false", i)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		allCommitted := true
+		for _, n := range nodes {
+			if n == behind {
+				continue
+			}
+			n.mu.Lock()
+			committed := n.commitIndex == 3
+			n.mu.Unlock()
+			if !committed {
+				allCommitted = false
+				break
+			}
+		}
+		if allCommitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the reachable nodes did not commit all 3 entries within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := leader.Compact(3); err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+
+	transport.reconnect(behind.id)
+
+	if _, _, isLeader := leader.Propose([]byte("after reconnect")); !isLeader {
+		t.Fatalf("Propose after reconnect reported isLeader = false")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		allCaughtUp := true
+		for _, n := range nodes {
+			n.mu.Lock()
+			caughtUp := n.commitIndex == 4 && n.lastLogIndexLocked() == 4
+			n.mu.Unlock()
+			if !caughtUp {
+				allCaughtUp = false
+				break
+			}
+		}
+		if allCaughtUp {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the previously far behind follower did not catch up via InstallSnapshot within timeout")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
