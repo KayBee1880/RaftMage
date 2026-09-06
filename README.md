@@ -43,8 +43,9 @@ Principles this build has actually practiced, each one checkable against the com
 - **Log replication (leader side)**: per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
 - **Client-facing write API (`Propose`)**: the first way to actually get a write into the cluster. Rejected outright on a non-leader (`isLeader == false`, so a client knows to look elsewhere), otherwise appended to the leader's log and replicated immediately rather than waiting for the next 50ms heartbeat tick. A single-node cluster commits its own proposal instantly, since the leader alone is already a majority.
 - **Crash recovery**: `currentTerm`, `votedFor`, and the log are persisted to disk (`FileStorage`, an atomic JSON snapshot per write, using a temp file, `fsync`, and rename, so a crash mid-write can never corrupt the on-disk state) before a node responds to any RPC that depends on that state surviving a restart: granting a vote, replicating an entry, or accepting a client's `Propose`. A restarted node reloads its term, vote, and log from disk instead of starting blank, which is what actually makes it safe to keep participating in the cluster afterward rather than risking a repeated vote or a forgotten entry.
-- **Log compaction (`Node.Compact`)**: trims committed log entries a node no longer needs to keep in memory or on disk, replacing them with a `(lastIncludedIndex, lastIncludedTerm)` boundary the rest of the code treats as a normal (if unusually old) log position. Deliberately scoped: a leader may only compact up to the *slowest* follower's confirmed `matchIndex`, never past it, which means every follower can always be caught up with ordinary `AppendEntries`, so this slice needed no `InstallSnapshot` RPC to stay safe. That's a real, stated tradeoff, not an oversight: a follower that falls far enough behind (or is offline) simply blocks further compaction rather than risking being stranded. There's also still no state machine, so a "snapshot" here is log metadata only, not a serialized KV-store snapshot; see [docs/architecture.md](docs/architecture.md) for the honest boundary. Proven end-to-end with three real nodes: `TestLeaderCompactsLogSafelyWithoutStrandingFollowers`.
-- **60 tests, all passing** (56 in `internal/raft`, 4 in `internal/storage`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Log compaction (`Node.Compact`)**: trims committed log entries a node no longer needs to keep in memory or on disk, replacing them with a `(lastIncludedIndex, lastIncludedTerm)` boundary the rest of the code treats as a normal (if unusually old) log position. Bounded only by `commitIndex`, matching standard Raft: any node, leader or follower, may compact anything it knows is committed, whether or not every peer has caught up to that point. There's still no state machine, so a "snapshot" here is log metadata only, not a serialized KV-store snapshot; see [docs/architecture.md](docs/architecture.md) for the honest boundary.
+- **`InstallSnapshot` RPC**: what makes the compaction rule above safe. When a leader's `replicatePeer` discovers a follower's `nextIndex` has fallen behind the leader's own `lastIncludedIndex`, meaning it can no longer explain that follower's log position through ordinary `AppendEntries`, it sends an `InstallSnapshot` instead: just the boundary, adopted directly, followed immediately by ordinary replication for everything after it. A follower that already has entries consistent with the offered boundary keeps them rather than discarding needlessly, the Raft paper's retain trailing entries optimization. Proven end-to-end with three real nodes, one deliberately disconnected before any entries are proposed, then reconnected after the leader has compacted well past what it ever received: `TestLeaderInstallsSnapshotToCatchUpFarBehindFollower`.
+- **69 tests, all passing** (65 in `internal/raft`, 4 in `internal/storage`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner; there is no standalone server binary or client yet. See Roadmap.
 
@@ -106,7 +107,6 @@ graph TB
 | Component | Milestone |
 |---|---|
 | gRPC + Protocol Buffers | Real network transport |
-| `InstallSnapshot` RPC | Catching up a far-behind follower past a leader's compaction point |
 | Deterministic simulation harness (fault injection) | Correctness testing under partitions/crashes |
 | Structured logs + metrics | Observability |
 
@@ -120,9 +120,9 @@ graph TB
 - [x] Log replication, leader side (`nextIndex`/`matchIndex`, retry, commit advancement)
 - [x] Client-facing write API (`Propose`)
 - [x] Persistent write-ahead log + crash recovery
-- [x] Log compaction (leader-conservative, bounded by follower `matchIndex`; no `InstallSnapshot` needed for this slice)
-- [ ] **`InstallSnapshot` RPC (catch up a follower that's fallen behind the compaction point)** ← current
-- [ ] Real gRPC transport
+- [x] Log compaction (bounded only by `commitIndex`, matching standard Raft)
+- [x] `InstallSnapshot` RPC (catch up a follower that's fallen behind the compaction point)
+- [ ] **Real gRPC transport** ← current
 - [ ] Cluster membership changes
 - [ ] Deterministic simulation / fault-injection testing
 - [ ] Observability (structured logs, metrics)
@@ -151,10 +151,11 @@ raftmage/
     │   ├── election_timer.go    # randomized election-timeout loop
     │   ├── append_entries.go    # AppendEntries RPC: heartbeats + log replication (both sides)
     │   ├── propose.go           # Propose: the client-facing write API
-    │   ├── compact.go           # Node.Compact: leader-conservative log compaction
+    │   ├── compact.go           # Node.Compact: log compaction, bounded only by commitIndex
+    │   ├── install_snapshot.go  # InstallSnapshot RPC: catches up a far-behind follower
     │   ├── transport.go         # Transport interface: the network dependency-inversion boundary
     │   ├── storage.go           # Storage interface: the persistence dependency-inversion boundary
-    │   └── *_test.go            # 56 tests, including three 3-node integration tests
+    │   └── *_test.go            # 65 tests, including four 3-node integration tests
     └── storage/                 # the real, disk-backed Storage implementation
         ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
         └── file_storage_test.go # 4 tests
@@ -188,6 +189,7 @@ The closest thing to a running demo right now: three real nodes electing a leade
 go test ./internal/raft -run TestLeaderHeartbeatsPreventFollowerReelection -v
 go test ./internal/raft -run TestLeaderReplicatesAndCommitsAcrossRealNodes -v
 go test ./internal/raft -run TestLeaderCompactsLogSafelyWithoutStrandingFollowers -v
+go test ./internal/raft -run TestLeaderInstallsSnapshotToCatchUpFarBehindFollower -v
 ```
 
 ## Documentation
