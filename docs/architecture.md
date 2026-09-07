@@ -41,7 +41,7 @@ graph TB
 | Log compaction (`Node.Compact`) | Implemented: bounded only by `commitIndex`, matching standard Raft. Any node, leader or follower, may compact anything it knows is committed, regardless of whether every peer has caught up to that point; the row below is what makes that safe. There's still no state machine, so what's compacted is log metadata (`lastIncludedIndex`/`lastIncludedTerm`), not a serialized snapshot of applied state |
 | `InstallSnapshot` RPC | Implemented: when a leader's `replicatePeer` finds a follower's `nextIndex` has fallen behind the leader's own `lastIncludedIndex`, it sends this instead of `AppendEntries`, since it can no longer explain that follower's log position at all. Carries only the boundary (`LastIncludedIndex`/`LastIncludedTerm`), no snapshot payload, since there is no state machine to serialize |
 | State Machine (KV store) | Planned |
-| Transport (real gRPC) | Planned: election and heartbeats currently run over an injected `Transport` interface (an in-process fake in unit tests, a loopback implementation in the multi-node integration test), not real network calls |
+| Transport (real gRPC) | Implemented: `internal/transport`'s `GRPCTransport`/`GRPCServer` satisfy the same `Transport` interface the consensus core already depended on, backed by real `google.golang.org/grpc` clients and servers, generated from `internal/transport/raftpb/raft.proto`, not an in-process fake. No TLS yet, and `Transport`'s method signatures still take no `context.Context`, so `GRPCTransport` bounds every call with a fixed internal timeout rather than a caller-supplied deadline; both are honest, named gaps, not oversights |
 | Client API | Planned |
 
 ## Raft core dependency direction
@@ -56,7 +56,7 @@ graph LR
         StorageIface["Storage (interface)"]
     end
 
-    GRPCTransport["gRPC Transport<br/>(planned)"] -.implements.-> TransportIface
+    GRPCTransport["internal/transport.GRPCTransport<br/>(implemented)"] -.implements.-> TransportIface
     SimTransport["Simulated Transport<br/>(planned, for testing)"] -.implements.-> TransportIface
     FileStorageImpl["internal/storage.FileStorage<br/>(implemented)"] -.implements.-> StorageIface
     Node --> TransportIface
@@ -91,14 +91,17 @@ An unbounded log is still a real problem `FileStorage` alone doesn't solve: ever
 
 Compacting past a slow follower's progress raises an obvious question: what happens when that follower is finally reachable again, and the leader has already discarded the log entries needed to explain its position through ordinary `AppendEntries`? That is what `InstallSnapshot` (`install_snapshot.go`) answers. When `replicatePeer` finds a peer's `nextIndex` has fallen behind the leader's `lastIncludedIndex`, it sends `InstallSnapshotArgs{LastIncludedIndex, LastIncludedTerm}` instead of an `AppendEntries` it could no longer construct correctly. The follower adopts that boundary directly (discarding its own conflicting log, or retaining any trailing entries that are still consistent with it, the Raft paper's own optimization), advances its `commitIndex` to match, and persists the result the same way any other state change is persisted. The leader then resumes ordinary replication from the new boundary in the very same `replicatePeer` call, so a badly behind follower can go from unexplainable to fully caught up in one round rather than waiting for a second heartbeat tick. Because there is still no state machine, this RPC carries no snapshot payload at all, only the boundary; a real Raft `InstallSnapshot` moving actual application state across the wire is a distinct future step, not something skipped by accident here. Proven against three real nodes: `TestLeaderInstallsSnapshotToCatchUpFarBehindFollower`, which disconnects one follower before any entries exist, replicates and commits and compacts using only the other two, reconnects the disconnected follower, and confirms it converges to the exact same committed history as everyone else.
 
+Every RPC above has, until now, only ever traveled through an in-process `Transport` implementation, real consensus logic, but never a real byte on a real wire. `internal/transport` closes that gap. `GRPCTransport` and `GRPCServer` implement the same `Transport` interface `internal/raft` already depended on, backed by a real `google.golang.org/grpc` client and server generated from `internal/transport/raftpb/raft.proto`, a wire format description independent of Go. `internal/raft` itself still imports nothing network-related; `GRPCTransport`/`GRPCServer` live entirely outside it, satisfying the interface from the outside, the exact dependency-injection shape `internal/storage.FileStorage` already established for `Storage`. Because `Transport`'s methods take no `context.Context` (they predate any implementation that could hang), `GRPCTransport` bounds every call with its own fixed internal timeout rather than one supplied by a caller, and there is no TLS yet either; both are stated plainly rather than glossed over. Proven against three real nodes communicating only over actual TCP sockets on localhost, not an in-process call: `TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC`, which elects a leader and replicates a committed write across real network connections end to end.
+
 ## Package layout
 
 Only what currently exists; more packages get added as later milestones need them.
 
 ```
 raftmage/
-  internal/raft/     Raft consensus core: Node, roles, RequestVote/AppendEntries/InstallSnapshot RPCs, election, heartbeats, Propose, log compaction, the Storage interface
-  internal/storage/  FileStorage: the real, disk-backed Storage implementation (crash-safe JSON snapshots)
+  internal/raft/      Raft consensus core: Node, roles, RequestVote/AppendEntries/InstallSnapshot RPCs, election, heartbeats, Propose, log compaction, the Transport/Storage interfaces
+  internal/storage/   FileStorage: the real, disk-backed Storage implementation (crash-safe JSON snapshots)
+  internal/transport/ GRPCTransport/GRPCServer: the real, network-backed Transport implementation, plus the generated raftpb package
   docs/               This document and future design docs
   private/            Gitignored personal study notes (mirrors real file paths)
 ```

@@ -31,7 +31,7 @@ Principles this build has actually practiced, each one checkable against the com
 - **Reasoning is documented as "naive approach → why it breaks → the fix,"** not just "here's the code." Design docs and code-level rationale consistently explain why a simpler approach, such as a fixed (non-randomized) election timeout, or counting replicas without Raft's current-term-only commit rule, would be unsafe or livelock the cluster, before describing what's actually implemented.
 - **Safety is enforced at the core, not left to callers.** All node-state mutation goes through a single mutex-guarded path inside the `Node` type; a `*Locked` naming convention makes it explicit which internal functions assume the lock is already held, so correctness doesn't depend on every caller remembering to lock correctly.
 - **Deferred and rejected scope is stated explicitly, not silently absent.** [docs/architecture.md](docs/architecture.md) tracks Implemented vs. Planned per component; the Roadmap below does the same.
-- **Tests exercise real logic, not mocks pretending to be the system.** Two things get faked where a test doesn't need the real thing: the network (`fakeTransport` for units, `loopbackTransport` for the multi-node integration tests) and, in most tests, persistence (`fakeStorage`). The consensus logic itself, including real goroutines, timers, vote counting, and log persistence, runs for real; the actual `FileStorage` implementation is tested directly against the filesystem, not just faked.
+- **Tests exercise real logic, not mocks pretending to be the system.** Two things still get faked where a unit test doesn't need the real thing: the network (`fakeTransport`) and, in most tests, persistence (`fakeStorage`). The consensus logic itself, including real goroutines, timers, vote counting, and log persistence, runs for real; the actual `FileStorage` implementation is tested directly against the filesystem, and the actual `GRPCTransport`/`GRPCServer` are tested directly over real TCP sockets, neither one just faked.
 - **CI runs the full suite with Go's race detector** (`go test ./... -race`) on every push and pull request; concurrency bugs are a CI gate, not something caught by hoping.
 
 ## What's actually working right now
@@ -45,13 +45,14 @@ Principles this build has actually practiced, each one checkable against the com
 - **Crash recovery**: `currentTerm`, `votedFor`, and the log are persisted to disk (`FileStorage`, an atomic JSON snapshot per write, using a temp file, `fsync`, and rename, so a crash mid-write can never corrupt the on-disk state) before a node responds to any RPC that depends on that state surviving a restart: granting a vote, replicating an entry, or accepting a client's `Propose`. A restarted node reloads its term, vote, and log from disk instead of starting blank, which is what actually makes it safe to keep participating in the cluster afterward rather than risking a repeated vote or a forgotten entry.
 - **Log compaction (`Node.Compact`)**: trims committed log entries a node no longer needs to keep in memory or on disk, replacing them with a `(lastIncludedIndex, lastIncludedTerm)` boundary the rest of the code treats as a normal (if unusually old) log position. Bounded only by `commitIndex`, matching standard Raft: any node, leader or follower, may compact anything it knows is committed, whether or not every peer has caught up to that point. There's still no state machine, so a "snapshot" here is log metadata only, not a serialized KV-store snapshot; see [docs/architecture.md](docs/architecture.md) for the honest boundary.
 - **`InstallSnapshot` RPC**: what makes the compaction rule above safe. When a leader's `replicatePeer` discovers a follower's `nextIndex` has fallen behind the leader's own `lastIncludedIndex`, meaning it can no longer explain that follower's log position through ordinary `AppendEntries`, it sends an `InstallSnapshot` instead: just the boundary, adopted directly, followed immediately by ordinary replication for everything after it. A follower that already has entries consistent with the offered boundary keeps them rather than discarding needlessly, the Raft paper's retain trailing entries optimization. Proven end-to-end with three real nodes, one deliberately disconnected before any entries are proposed, then reconnected after the leader has compacted well past what it ever received: `TestLeaderInstallsSnapshotToCatchUpFarBehindFollower`.
-- **69 tests, all passing** (65 in `internal/raft`, 4 in `internal/storage`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Real gRPC transport**: `GRPCTransport`/`GRPCServer` (`internal/transport`) implement the exact same `Transport` interface the consensus core already depends on, backed by real `google.golang.org/grpc` clients and servers instead of an in-process fake. Every RPC's wire format is generated from a `.proto` definition, not hand-rolled. Proven with three real nodes electing a leader and replicating a committed write over actual TCP sockets, not just an in-process call: `TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC`.
+- **75 tests, all passing** (65 in `internal/raft`, 4 in `internal/storage`, 6 in `internal/transport`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner; there is no standalone server binary or client yet. See Roadmap.
 
 ## Architecture
 
-**Current state**: what's really running today. No client, no real network, no standalone process. `Node` instances talk to each other only through an in-process `Transport` implementation and persist through a real `Storage` implementation, orchestrated entirely by Go's test runner.
+**Current state**: what's really running today. No client, no standalone process yet. `Node` instances can talk to each other over a real network (`GRPCTransport`/`GRPCServer`, real `google.golang.org/grpc` sockets) or an in-process fake, and persist through a real `Storage` implementation, still entirely orchestrated by Go's test runner, not a long-running binary.
 
 ```mermaid
 graph LR
@@ -60,7 +61,7 @@ graph LR
         N2["Node"]
         N3["Node"]
     end
-    TP["Transport interface<br/>(fakeTransport in unit tests,<br/>loopbackTransport in the integration test)"]
+    TP["Transport interface<br/>(fakeTransport/loopbackTransport in most tests,<br/>real GRPCTransport over TCP in internal/transport's tests)"]
     ST["Storage interface<br/>(fakeStorage in most tests,<br/>real FileStorage where persistence is tested)"]
     N1 --> TP
     N2 --> TP
@@ -100,13 +101,13 @@ graph TB
 |---|---|
 | Go 1.26 | Goroutines/channels map directly onto Raft's concurrent RPC fan-out and per-role background timers; strong static typing catches a class of consensus bugs at compile time. |
 | Go's standard `testing` package | Sufficient for the current unit + integration test needs; no external framework justified yet. |
+| gRPC + Protocol Buffers | `internal/transport`'s real `GRPCTransport`/`GRPCServer`, generated from `internal/transport/raftpb/raft.proto`; a wire format independent of Go, ready for the eventual `Client API` and cluster membership work to build on. |
 | GitHub Actions | Free, native CI for a GitHub-hosted repo; runs build, `vet`, and race-detector tests on every push/PR. |
 
 **Planned**
 
 | Component | Milestone |
 |---|---|
-| gRPC + Protocol Buffers | Real network transport |
 | Deterministic simulation harness (fault injection) | Correctness testing under partitions/crashes |
 | Structured logs + metrics | Observability |
 
@@ -122,8 +123,8 @@ graph TB
 - [x] Persistent write-ahead log + crash recovery
 - [x] Log compaction (bounded only by `commitIndex`, matching standard Raft)
 - [x] `InstallSnapshot` RPC (catch up a follower that's fallen behind the compaction point)
-- [ ] **Real gRPC transport** ← current
-- [ ] Cluster membership changes
+- [x] Real gRPC transport
+- [ ] **Cluster membership changes** ← current
 - [ ] Deterministic simulation / fault-injection testing
 - [ ] Observability (structured logs, metrics)
 - [ ] Sharding (stretch goal, past the core single-group KV store)
@@ -156,9 +157,17 @@ raftmage/
     │   ├── transport.go         # Transport interface: the network dependency-inversion boundary
     │   ├── storage.go           # Storage interface: the persistence dependency-inversion boundary
     │   └── *_test.go            # 65 tests, including four 3-node integration tests
-    └── storage/                 # the real, disk-backed Storage implementation
-        ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
-        └── file_storage_test.go # 4 tests
+    ├── storage/                 # the real, disk-backed Storage implementation
+    │   ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
+    │   └── file_storage_test.go # 4 tests
+    └── transport/               # the real, network-backed Transport implementation
+        ├── raftpb/
+        │   ├── raft.proto       # wire format for RequestVote/AppendEntries/InstallSnapshot
+        │   ├── raft.pb.go       # generated by protoc, not hand-written
+        │   └── raft_grpc.pb.go  # generated by protoc, not hand-written
+        ├── client.go            # GRPCTransport: satisfies raft.Transport over real gRPC
+        ├── server.go            # GRPCServer: dispatches incoming RPCs to a real *raft.Node
+        └── *_test.go            # 6 tests, including a 3-node cluster over real TCP sockets
 ```
 
 No `cmd/` entrypoint yet; there is nothing to `go run`. See Roadmap.
@@ -190,6 +199,7 @@ go test ./internal/raft -run TestLeaderHeartbeatsPreventFollowerReelection -v
 go test ./internal/raft -run TestLeaderReplicatesAndCommitsAcrossRealNodes -v
 go test ./internal/raft -run TestLeaderCompactsLogSafelyWithoutStrandingFollowers -v
 go test ./internal/raft -run TestLeaderInstallsSnapshotToCatchUpFarBehindFollower -v
+go test ./internal/transport -run TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC -v
 ```
 
 ## Documentation
