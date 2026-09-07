@@ -123,6 +123,12 @@ func (n *Node) VotedFor() string {
 	return n.votedFor
 }
 
+func (n *Node) CommitIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
+}
+
 func (n *Node) lastLogIndexLocked() uint64 {
 	return n.lastIncludedIndex + uint64(len(n.log))
 }
