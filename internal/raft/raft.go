@@ -27,18 +27,27 @@ func (r Role) String() string {
 	}
 }
 
+type EntryType int
+
+const (
+	EntryCommand EntryType = iota
+	EntryConfig
+)
+
 type LogEntry struct {
 	Term    uint64
+	Type    EntryType
 	Command []byte
+	Config  []string
 }
 
 type Node struct {
 	mu sync.Mutex
 
-	id        string
-	peers     []string
-	transport Transport
-	storage   Storage
+	id         string
+	baseConfig []string
+	transport  Transport
+	storage    Storage
 
 	role Role
 
@@ -65,7 +74,7 @@ func NewNode(id string, peers []string, transport Transport, storage Storage) *N
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{
 		id:              id,
-		peers:           peers,
+		baseConfig:      peers,
 		transport:       transport,
 		storage:         storage,
 		role:            Follower,
@@ -84,6 +93,9 @@ func NewNode(id string, peers []string, transport Transport, storage Storage) *N
 		n.log = state.Log
 		n.lastIncludedIndex = state.LastIncludedIndex
 		n.lastIncludedTerm = state.LastIncludedTerm
+		if state.BaseConfig != nil {
+			n.baseConfig = state.BaseConfig
+		}
 	}
 
 	return n
@@ -99,6 +111,7 @@ func (n *Node) persistStateLocked() {
 		Log:               n.log,
 		LastIncludedIndex: n.lastIncludedIndex,
 		LastIncludedTerm:  n.lastIncludedTerm,
+		BaseConfig:        n.baseConfig,
 	}
 	if err := n.storage.Save(state); err != nil {
 		panic("raft: failed to persist state: " + err.Error())
@@ -145,4 +158,27 @@ func (n *Node) logTermAtLocked(index uint64) uint64 {
 		return n.lastIncludedTerm
 	}
 	return n.log[index-n.lastIncludedIndex-1].Term
+}
+
+func (n *Node) currentConfigLocked() []string {
+	for i := len(n.log) - 1; i >= 0; i-- {
+		if n.log[i].Type == EntryConfig {
+			return filterOut(n.log[i].Config, n.id)
+		}
+	}
+	return append([]string(nil), n.baseConfig...)
+}
+
+func (n *Node) currentFullConfigLocked() []string {
+	return append([]string{n.id}, n.currentConfigLocked()...)
+}
+
+func filterOut(list []string, exclude string) []string {
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if s != exclude {
+			out = append(out, s)
+		}
+	}
+	return out
 }

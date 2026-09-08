@@ -7,6 +7,7 @@ type InstallSnapshotArgs struct {
 	LeaderID          string
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
+	Config            []string
 }
 
 type InstallSnapshotReply struct {
@@ -38,6 +39,7 @@ func (n *Node) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapshotRe
 
 	n.lastIncludedIndex = args.LastIncludedIndex
 	n.lastIncludedTerm = args.LastIncludedTerm
+	n.baseConfig = filterOut(args.Config, n.id)
 	if n.commitIndex < args.LastIncludedIndex {
 		n.commitIndex = args.LastIncludedIndex
 	}

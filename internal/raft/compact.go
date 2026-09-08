@@ -16,7 +16,15 @@ func (n *Node) Compact(upToIndex uint64) error {
 	}
 
 	lastIncludedTerm := n.logTermAtLocked(upToIndex)
+	trimmed := n.log[:upToIndex-n.lastIncludedIndex]
 	remaining := append([]LogEntry(nil), n.log[upToIndex-n.lastIncludedIndex:]...)
+
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		if trimmed[i].Type == EntryConfig {
+			n.baseConfig = filterOut(trimmed[i].Config, n.id)
+			break
+		}
+	}
 
 	n.lastIncludedIndex = upToIndex
 	n.lastIncludedTerm = lastIncludedTerm

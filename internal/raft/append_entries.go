@@ -85,7 +85,7 @@ func (n *Node) runHeartbeats(term uint64) {
 
 func (n *Node) sendHeartbeats(term uint64) {
 	n.mu.Lock()
-	peers := append([]string(nil), n.peers...)
+	peers := n.currentConfigLocked()
 	n.mu.Unlock()
 
 	for _, peer := range peers {
@@ -94,11 +94,32 @@ func (n *Node) sendHeartbeats(term uint64) {
 }
 
 func (n *Node) initLeaderStateLocked() {
-	n.nextIndex = make(map[string]uint64, len(n.peers))
-	n.matchIndex = make(map[string]uint64, len(n.peers))
-	for _, peer := range n.peers {
+	members := n.currentConfigLocked()
+	n.nextIndex = make(map[string]uint64, len(members))
+	n.matchIndex = make(map[string]uint64, len(members))
+	for _, peer := range members {
 		n.nextIndex[peer] = n.lastLogIndexLocked() + 1
 		n.matchIndex[peer] = 0
+	}
+}
+
+func (n *Node) reconcileLeaderStateForConfigChangeLocked() {
+	if n.role != Leader {
+		return
+	}
+	members := make(map[string]bool)
+	for _, peer := range n.currentConfigLocked() {
+		members[peer] = true
+		if _, ok := n.nextIndex[peer]; !ok {
+			n.nextIndex[peer] = n.lastLogIndexLocked() + 1
+			n.matchIndex[peer] = 0
+		}
+	}
+	for peer := range n.nextIndex {
+		if !members[peer] {
+			delete(n.nextIndex, peer)
+			delete(n.matchIndex, peer)
+		}
 	}
 }
 
@@ -168,6 +189,7 @@ func (n *Node) sendInstallSnapshot(term uint64, peer string) bool {
 		LeaderID:          n.id,
 		LastIncludedIndex: n.lastIncludedIndex,
 		LastIncludedTerm:  n.lastIncludedTerm,
+		Config:            n.currentFullConfigLocked(),
 	}
 	transport := n.transport
 	n.mu.Unlock()
@@ -197,19 +219,33 @@ func (n *Node) sendInstallSnapshot(term uint64, peer string) bool {
 }
 
 func (n *Node) advanceCommitIndexLocked(term uint64) {
+	members := n.currentConfigLocked()
 	for N := n.lastLogIndexLocked(); N > n.commitIndex; N-- {
 		if n.logTermAtLocked(N) != term {
 			break
 		}
 		replicated := 1
-		for _, peer := range n.peers {
+		for _, peer := range members {
 			if n.matchIndex[peer] >= N {
 				replicated++
 			}
 		}
-		if replicated*2 > len(n.peers)+1 {
+		if replicated*2 > len(members)+1 {
 			n.commitIndex = N
+			entry := n.log[N-n.lastIncludedIndex-1]
+			if n.role == Leader && entry.Type == EntryConfig && !containsString(entry.Config, n.id) {
+				n.role = Follower
+			}
 			return
 		}
 	}
+}
+
+func containsString(list []string, target string) bool {
+	for _, s := range list {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }

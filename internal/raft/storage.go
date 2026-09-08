@@ -6,6 +6,7 @@ type PersistentState struct {
 	Log               []LogEntry
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
+	BaseConfig        []string
 }
 
 type Storage interface {

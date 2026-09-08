@@ -31,7 +31,12 @@ func (s *GRPCServer) RequestVote(_ context.Context, req *raftpb.RequestVoteReque
 func (s *GRPCServer) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesReply, error) {
 	entries := make([]raft.LogEntry, len(req.GetEntries()))
 	for i, e := range req.GetEntries() {
-		entries[i] = raft.LogEntry{Term: e.GetTerm(), Command: e.GetCommand()}
+		entries[i] = raft.LogEntry{
+			Term:    e.GetTerm(),
+			Command: e.GetCommand(),
+			Type:    entryTypeFromPB(e.GetType()),
+			Config:  e.GetConfig(),
+		}
 	}
 	reply := s.node.HandleAppendEntries(raft.AppendEntriesArgs{
 		Term:         req.GetTerm(),
@@ -50,8 +55,16 @@ func (s *GRPCServer) InstallSnapshot(_ context.Context, req *raftpb.InstallSnaps
 		LeaderID:          req.GetLeaderId(),
 		LastIncludedIndex: req.GetLastIncludedIndex(),
 		LastIncludedTerm:  req.GetLastIncludedTerm(),
+		Config:            req.GetConfig(),
 	})
 	return &raftpb.InstallSnapshotReply{Term: reply.Term}, nil
+}
+
+func entryTypeFromPB(t raftpb.EntryType) raft.EntryType {
+	if t == raftpb.EntryType_ENTRY_CONFIG {
+		return raft.EntryConfig
+	}
+	return raft.EntryCommand
 }
 
 func NewServer(node *raft.Node) *grpc.Server {

@@ -53,7 +53,7 @@ func (n *Node) StartElection() {
 		LastLogIndex: n.lastLogIndexLocked(),
 		LastLogTerm:  n.lastLogTermLocked(),
 	}
-	peers := append([]string(nil), n.peers...)
+	peers := n.currentConfigLocked()
 	transport := n.transport
 	n.mu.Unlock()
 

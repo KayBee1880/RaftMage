@@ -73,7 +73,12 @@ func (t *GRPCTransport) SendAppendEntries(peer string, args raft.AppendEntriesAr
 	}
 	entries := make([]*raftpb.LogEntry, len(args.Entries))
 	for i, e := range args.Entries {
-		entries[i] = &raftpb.LogEntry{Term: e.Term, Command: e.Command}
+		entries[i] = &raftpb.LogEntry{
+			Term:    e.Term,
+			Command: e.Command,
+			Type:    entryTypeToPB(e.Type),
+			Config:  e.Config,
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
@@ -103,11 +108,19 @@ func (t *GRPCTransport) SendInstallSnapshot(peer string, args raft.InstallSnapsh
 		LeaderId:          args.LeaderID,
 		LastIncludedIndex: args.LastIncludedIndex,
 		LastIncludedTerm:  args.LastIncludedTerm,
+		Config:            args.Config,
 	})
 	if err != nil {
 		return raft.InstallSnapshotReply{}, err
 	}
 	return raft.InstallSnapshotReply{Term: reply.GetTerm()}, nil
+}
+
+func entryTypeToPB(t raft.EntryType) raftpb.EntryType {
+	if t == raft.EntryConfig {
+		return raftpb.EntryType_ENTRY_CONFIG
+	}
+	return raftpb.EntryType_ENTRY_COMMAND
 }
 
 func (t *GRPCTransport) Close() error {
