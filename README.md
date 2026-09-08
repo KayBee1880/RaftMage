@@ -47,7 +47,8 @@ Principles this build has actually practiced, each one checkable against the com
 - **`InstallSnapshot` RPC**: what makes the compaction rule above safe. When a leader's `replicatePeer` discovers a follower's `nextIndex` has fallen behind the leader's own `lastIncludedIndex`, meaning it can no longer explain that follower's log position through ordinary `AppendEntries`, it sends an `InstallSnapshot` instead: just the boundary, adopted directly, followed immediately by ordinary replication for everything after it. A follower that already has entries consistent with the offered boundary keeps them rather than discarding needlessly, the Raft paper's retain trailing entries optimization. Proven end-to-end with three real nodes, one deliberately disconnected before any entries are proposed, then reconnected after the leader has compacted well past what it ever received: `TestLeaderInstallsSnapshotToCatchUpFarBehindFollower`.
 - **Real gRPC transport**: `GRPCTransport`/`GRPCServer` (`internal/transport`) implement the exact same `Transport` interface the consensus core already depends on, backed by real `google.golang.org/grpc` clients and servers instead of an in-process fake. Every RPC's wire format is generated from a `.proto` definition, not hand-rolled. Proven with three real nodes electing a leader and replicating a committed write over actual TCP sockets, not just an in-process call: `TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC`.
 - **Cluster membership changes (`Node.AddServer`/`Node.RemoveServer`)**: adds or removes one server at a time, the standard simplification (from Ongaro's Raft thesis) that avoids needing full joint consensus, since any two configurations differing by one member always share an overlapping majority. A configuration change is just another log entry (`EntryConfig`), replicated, retried, and committed by the exact same code path as an ordinary write, adopted the instant it's appended, not only once committed, per Raft's own rule. A leader that commits its own removal steps down automatically. Proven with real, concurrently-running nodes both growing a cluster (`TestLeaderAddsServerAndReplicatesToNewMember`, a brand new node joins and catches up on replication) and shrinking one (`TestLeaderRemovesFollowerAndContinuesOperating`, the remaining nodes keep functioning correctly).
-- **91 tests, all passing** (81 in `internal/raft`, 4 in `internal/storage`, 6 in `internal/transport`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Fault-injection testing (`internal/sim`)**: `SimTransport` wraps real `Node`s in a seeded random fault injector, random per-message delay, random message drops, and node isolation/restore, so a fixed seed reproduces the same aggregate fault behavior across runs. Not a virtual-time deterministic simulator (real goroutines and real wall-clock scheduling still introduce some nondeterminism in exactly which message draws which random outcome, an honestly stated gap, not a claim this project makes); see [docs/architecture.md](docs/architecture.md) for the precise boundary. Its flagship test, `TestClusterMaintainsSafetyUnderRandomFaults`, runs a real 5-node cluster for 3 seconds under continuous random delay, drops, and single-node isolation while proposing writes, and checks two Raft safety properties on every poll, not just at the end: election safety (never two leaders in the same term) and state machine safety (no two nodes ever disagree about a committed entry).
+- **99 tests, all passing** (81 in `internal/raft`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner; there is no standalone server binary or client yet. See Roadmap.
 
@@ -104,12 +105,13 @@ graph TB
 | Go's standard `testing` package | Sufficient for the current unit + integration test needs; no external framework justified yet. |
 | gRPC + Protocol Buffers | `internal/transport`'s real `GRPCTransport`/`GRPCServer`, generated from `internal/transport/raftpb/raft.proto`; a wire format independent of Go, already carrying cluster-membership changes over the wire and ready for the eventual `Client API` to build on too. |
 | GitHub Actions | Free, native CI for a GitHub-hosted repo; runs build, `vet`, and race-detector tests on every push/PR. |
+| Go's standard `math/rand` (seeded) | `internal/sim`'s `SimTransport` draws every fault-injection decision (delay, drop) from one seeded `*rand.Rand`, so a fixed seed reproduces the same aggregate fault behavior without needing an external fuzzing framework. |
 
 **Planned**
 
 | Component | Milestone |
 |---|---|
-| Deterministic simulation harness (fault injection) | Correctness testing under partitions/crashes |
+| Virtual-time deterministic simulator | A distinct, larger step past `internal/sim`'s current seeded-fault-injection-over-real-time approach |
 | Structured logs + metrics | Observability |
 
 ## Roadmap
@@ -126,8 +128,8 @@ graph TB
 - [x] `InstallSnapshot` RPC (catch up a follower that's fallen behind the compaction point)
 - [x] Real gRPC transport
 - [x] Cluster membership changes (`AddServer`/`RemoveServer`, one server at a time)
-- [ ] **Deterministic simulation / fault-injection testing** ← current
-- [ ] Observability (structured logs, metrics)
+- [x] Fault-injection testing (`internal/sim`'s seeded `SimTransport` + safety-invariant checking; a full virtual-time deterministic simulator remains a distinct, larger future step)
+- [ ] **Observability (structured logs, metrics)** ← current
 - [ ] Sharding (stretch goal, past the core single-group KV store)
 
 Fuller status, including what's implemented vs. planned per component: [docs/architecture.md](docs/architecture.md).
@@ -162,14 +164,17 @@ raftmage/
     ├── storage/                 # the real, disk-backed Storage implementation
     │   ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
     │   └── file_storage_test.go # 4 tests
-    └── transport/               # the real, network-backed Transport implementation
-        ├── raftpb/
-        │   ├── raft.proto       # wire format for RequestVote/AppendEntries/InstallSnapshot
-        │   ├── raft.pb.go       # generated by protoc, not hand-written
-        │   └── raft_grpc.pb.go  # generated by protoc, not hand-written
-        ├── client.go            # GRPCTransport: satisfies raft.Transport over real gRPC
-        ├── server.go            # GRPCServer: dispatches incoming RPCs to a real *raft.Node
-        └── *_test.go            # 6 tests, including a 3-node cluster over real TCP sockets
+    ├── transport/               # the real, network-backed Transport implementation
+    │   ├── raftpb/
+    │   │   ├── raft.proto       # wire format for RequestVote/AppendEntries/InstallSnapshot
+    │   │   ├── raft.pb.go       # generated by protoc, not hand-written
+    │   │   └── raft_grpc.pb.go  # generated by protoc, not hand-written
+    │   ├── client.go            # GRPCTransport: satisfies raft.Transport over real gRPC
+    │   ├── server.go            # GRPCServer: dispatches incoming RPCs to a real *raft.Node
+    │   └── *_test.go            # 6 tests, including a 3-node cluster over real TCP sockets
+    └── sim/                     # seeded fault-injecting Transport, for chaos testing
+        ├── transport.go         # SimTransport: satisfies raft.Transport with random delay/drop/isolation
+        └── *_test.go            # 8 tests, including a 5-node safety-invariant chaos test
 ```
 
 No `cmd/` entrypoint yet; there is nothing to `go run`. See Roadmap.
@@ -204,6 +209,7 @@ go test ./internal/raft -run TestLeaderInstallsSnapshotToCatchUpFarBehindFollowe
 go test ./internal/transport -run TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC -v
 go test ./internal/raft -run TestLeaderAddsServerAndReplicatesToNewMember -v
 go test ./internal/raft -run TestLeaderRemovesFollowerAndContinuesOperating -v
+go test ./internal/sim -run TestClusterMaintainsSafetyUnderRandomFaults -v
 ```
 
 ## Documentation
