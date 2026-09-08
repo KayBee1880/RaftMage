@@ -348,3 +348,122 @@ func TestLeaderInstallsSnapshotToCatchUpFarBehindFollower(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestLeaderAddsServerAndReplicatesToNewMember(t *testing.T) {
+	transport := newLoopbackTransport()
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
+	nodes := []*Node{n1, n2, n3}
+
+	for _, n := range nodes {
+		transport.register(n)
+	}
+	for _, n := range nodes {
+		n.Run()
+	}
+	defer func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	}()
+
+	leader := waitForAnyLeader(t, nodes, 2*time.Second)
+
+	n4 := NewNode("node-4", nil, transport, nil)
+	transport.register(n4)
+	n4.Run()
+	defer n4.Stop()
+
+	if _, _, ok := leader.AddServer("node-4"); !ok {
+		t.Fatalf("AddServer on the elected leader reported ok = false")
+	}
+
+	if _, _, isLeader := leader.Propose([]byte("entry")); !isLeader {
+		t.Fatalf("Propose after AddServer reported isLeader = false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		n4.mu.Lock()
+		caughtUp := n4.commitIndex >= 2
+		n4.mu.Unlock()
+		if caughtUp {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the newly added node-4 did not catch up on replication within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestLeaderRemovesFollowerAndContinuesOperating(t *testing.T) {
+	transport := newLoopbackTransport()
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
+	nodes := []*Node{n1, n2, n3}
+
+	for _, n := range nodes {
+		transport.register(n)
+	}
+	for _, n := range nodes {
+		n.Run()
+	}
+	defer func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	}()
+
+	leader := waitForAnyLeader(t, nodes, 2*time.Second)
+
+	var removed, remaining *Node
+	for _, n := range nodes {
+		if n != leader {
+			if removed == nil {
+				removed = n
+			} else {
+				remaining = n
+			}
+		}
+	}
+
+	if _, _, ok := leader.RemoveServer(removed.id); !ok {
+		t.Fatalf("RemoveServer on the elected leader reported ok = false")
+	}
+	// A real deployment stops the removed process once it's out of the config;
+	// this project's Raft core doesn't manage process lifecycle, so the test
+	// does the equivalent here to avoid the removed node's own election timer
+	// starting a disruptive, doomed-to-lose election once heartbeats stop.
+	removed.Stop()
+
+	if _, _, isLeader := leader.Propose([]byte("entry")); !isLeader {
+		t.Fatalf("Propose after RemoveServer reported isLeader = false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		leader.mu.Lock()
+		leaderCaughtUp := leader.commitIndex == 2
+		leader.mu.Unlock()
+		remaining.mu.Lock()
+		remainingCaughtUp := remaining.commitIndex == 2
+		remaining.mu.Unlock()
+		if leaderCaughtUp && remainingCaughtUp {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the leader and remaining follower did not both commit within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	leader.mu.Lock()
+	got := leader.currentConfigLocked()
+	leader.mu.Unlock()
+	if len(got) != 1 || got[0] != remaining.id {
+		t.Fatalf("leader's currentConfigLocked() = %v, want [%s]", got, remaining.id)
+	}
+}
