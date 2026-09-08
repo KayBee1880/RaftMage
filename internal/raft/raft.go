@@ -142,6 +142,14 @@ func (n *Node) CommitIndex() uint64 {
 	return n.commitIndex
 }
 
+func (n *Node) CommittedEntries() (startIndex uint64, entries []LogEntry) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	startIndex = n.lastIncludedIndex + 1
+	entries = append([]LogEntry(nil), n.log[:n.commitIndex-n.lastIncludedIndex]...)
+	return startIndex, entries
+}
+
 func (n *Node) lastLogIndexLocked() uint64 {
 	return n.lastIncludedIndex + uint64(len(n.log))
 }
