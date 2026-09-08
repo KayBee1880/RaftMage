@@ -64,6 +64,10 @@ func TestAddServerAppendsConfigEntryAndUpdatesCurrentConfig(t *testing.T) {
 	if index != 1 || term != 1 {
 		t.Errorf("index/term = %d/%d, want 1/1", index, term)
 	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if len(n.log) != 1 || n.log[0].Type != EntryConfig {
 		t.Fatalf("log = %+v, want one EntryConfig entry", n.log)
 	}
@@ -146,6 +150,9 @@ func TestRemoveServerAppendsConfigEntryAndUpdatesCurrentConfig(t *testing.T) {
 	if index != 1 || term != 1 {
 		t.Errorf("index/term = %d/%d, want 1/1", index, term)
 	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
 	got := n.currentConfigLocked()
 	if len(got) != 1 || got[0] != "node-2" {
