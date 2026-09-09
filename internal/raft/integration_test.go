@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"raftmage/internal/kvstore"
 )
 
 type loopbackTransport struct {
@@ -465,5 +467,61 @@ func TestLeaderRemovesFollowerAndContinuesOperating(t *testing.T) {
 	leader.mu.Unlock()
 	if len(got) != 1 || got[0] != remaining.id {
 		t.Fatalf("leader's currentConfigLocked() = %v, want [%s]", got, remaining.id)
+	}
+}
+
+func TestLeaderAppliesProposedEntriesToStateMachineAcrossRealNodes(t *testing.T) {
+	transport := newLoopbackTransport()
+	n1 := NewNode("node-1", []string{"node-2", "node-3"}, transport, nil)
+	n2 := NewNode("node-2", []string{"node-1", "node-3"}, transport, nil)
+	n3 := NewNode("node-3", []string{"node-1", "node-2"}, transport, nil)
+	nodes := []*Node{n1, n2, n3}
+
+	stores := make([]*kvstore.Store, len(nodes))
+	for i, n := range nodes {
+		store := kvstore.NewStore()
+		n.SetStateMachine(store)
+		stores[i] = store
+	}
+
+	for _, n := range nodes {
+		transport.register(n)
+	}
+	for _, n := range nodes {
+		n.Run()
+	}
+	defer func() {
+		for _, n := range nodes {
+			n.Stop()
+		}
+	}()
+
+	leader := waitForAnyLeader(t, nodes, 2*time.Second)
+
+	command, err := kvstore.EncodeCommand(kvstore.Command{Op: kvstore.OpPut, Key: "x", Value: []byte("1")})
+	if err != nil {
+		t.Fatalf("EncodeCommand failed: %v", err)
+	}
+	if _, _, isLeader := leader.Propose(command); !isLeader {
+		t.Fatalf("Propose on the elected leader reported isLeader = false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		allApplied := true
+		for _, store := range stores {
+			value, ok := store.Get("x")
+			if !ok || string(value) != "1" {
+				allApplied = false
+				break
+			}
+		}
+		if allApplied {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not every node's state machine reflected the committed write within timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
