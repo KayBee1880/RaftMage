@@ -43,19 +43,20 @@ Principles this build has actually practiced, each one checkable against the com
 - **Log replication (leader side)**: per-follower `nextIndex`/`matchIndex` tracking, immediate retry at an earlier log position on rejection, and commit-index advancement gated by Raft's current-term-only rule (a leader can only directly commit an entry from its own term, never an earlier one, no matter how widely replicated). Proven with three real `Node` instances, not just asserted: `TestLeaderReplicatesAndCommitsAcrossRealNodes`.
 - **Client-facing write API (`Propose`)**: the first way to actually get a write into the cluster. Rejected outright on a non-leader (`isLeader == false`, so a client knows to look elsewhere), otherwise appended to the leader's log and replicated immediately rather than waiting for the next 50ms heartbeat tick. A single-node cluster commits its own proposal instantly, since the leader alone is already a majority.
 - **Crash recovery**: `currentTerm`, `votedFor`, and the log are persisted to disk (`FileStorage`, an atomic JSON snapshot per write, using a temp file, `fsync`, and rename, so a crash mid-write can never corrupt the on-disk state) before a node responds to any RPC that depends on that state surviving a restart: granting a vote, replicating an entry, or accepting a client's `Propose`. A restarted node reloads its term, vote, and log from disk instead of starting blank, which is what actually makes it safe to keep participating in the cluster afterward rather than risking a repeated vote or a forgotten entry.
-- **Log compaction (`Node.Compact`)**: trims committed log entries a node no longer needs to keep in memory or on disk, replacing them with a `(lastIncludedIndex, lastIncludedTerm)` boundary the rest of the code treats as a normal (if unusually old) log position. Bounded only by `commitIndex`, matching standard Raft: any node, leader or follower, may compact anything it knows is committed, whether or not every peer has caught up to that point. There's still no state machine, so a "snapshot" here is log metadata only, not a serialized KV-store snapshot; see [docs/architecture.md](docs/architecture.md) for the honest boundary.
+- **Log compaction (`Node.Compact`)**: trims committed log entries a node no longer needs to keep in memory or on disk, replacing them with a `(lastIncludedIndex, lastIncludedTerm)` boundary the rest of the code treats as a normal (if unusually old) log position. Bounded only by `commitIndex`, matching standard Raft: any node, leader or follower, may compact anything it knows is committed, whether or not every peer has caught up to that point. Still log metadata only, not a serialized snapshot of the state machine below, see that row's own honest boundary; see [docs/architecture.md](docs/architecture.md) for more.
 - **`InstallSnapshot` RPC**: what makes the compaction rule above safe. When a leader's `replicatePeer` discovers a follower's `nextIndex` has fallen behind the leader's own `lastIncludedIndex`, meaning it can no longer explain that follower's log position through ordinary `AppendEntries`, it sends an `InstallSnapshot` instead: just the boundary, adopted directly, followed immediately by ordinary replication for everything after it. A follower that already has entries consistent with the offered boundary keeps them rather than discarding needlessly, the Raft paper's retain trailing entries optimization. Proven end-to-end with three real nodes, one deliberately disconnected before any entries are proposed, then reconnected after the leader has compacted well past what it ever received: `TestLeaderInstallsSnapshotToCatchUpFarBehindFollower`.
 - **Real gRPC transport**: `GRPCTransport`/`GRPCServer` (`internal/transport`) implement the exact same `Transport` interface the consensus core already depends on, backed by real `google.golang.org/grpc` clients and servers instead of an in-process fake. Every RPC's wire format is generated from a `.proto` definition, not hand-rolled. Proven with three real nodes electing a leader and replicating a committed write over actual TCP sockets, not just an in-process call: `TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC`.
 - **Cluster membership changes (`Node.AddServer`/`Node.RemoveServer`)**: adds or removes one server at a time, the standard simplification (from Ongaro's Raft thesis) that avoids needing full joint consensus, since any two configurations differing by one member always share an overlapping majority. A configuration change is just another log entry (`EntryConfig`), replicated, retried, and committed by the exact same code path as an ordinary write, adopted the instant it's appended, not only once committed, per Raft's own rule. A leader that commits its own removal steps down automatically. Proven with real, concurrently-running nodes both growing a cluster (`TestLeaderAddsServerAndReplicatesToNewMember`, a brand new node joins and catches up on replication) and shrinking one (`TestLeaderRemovesFollowerAndContinuesOperating`, the remaining nodes keep functioning correctly).
 - **Fault-injection testing (`internal/sim`)**: `SimTransport` wraps real `Node`s in a seeded random fault injector, random per-message delay, random message drops, and node isolation/restore, so a fixed seed reproduces the same aggregate fault behavior across runs. Not a virtual-time deterministic simulator (real goroutines and real wall-clock scheduling still introduce some nondeterminism in exactly which message draws which random outcome, an honestly stated gap, not a claim this project makes); see [docs/architecture.md](docs/architecture.md) for the precise boundary. Its flagship test, `TestClusterMaintainsSafetyUnderRandomFaults`, runs a real 5-node cluster for 3 seconds under continuous random delay, drops, and single-node isolation while proposing writes, and checks two Raft safety properties on every poll, not just at the end: election safety (never two leaders in the same term) and state machine safety (no two nodes ever disagree about a committed entry).
 - **Observability (structured logs + metrics)**: `Node.SetLogger` attaches a standard-library `*slog.Logger` (nil by default, so every existing test is unaffected) that emits one structured log line per state transition, elections starting/won/lost, votes granted/denied with a reason, stepping down to follower, log compaction, snapshot installs, membership changes, proposed entries, never on routine per-heartbeat traffic. `Node.Metrics()` returns a small counter snapshot (elections, votes, entries proposed/committed, compactions, snapshots installed, membership changes) incremented at the same points. Deliberately a library feature, not a running service: no `cmd/` binary or HTTP `/metrics` endpoint exists yet to expose either one externally, an honest boundary, not an oversight; see [docs/architecture.md](docs/architecture.md).
-- **108 tests, all passing** (90 in `internal/raft`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **State machine (`internal/kvstore.Store`)**: a real, in-memory key-value store, `Put`/`Delete` commands JSON-encoded into the same opaque `[]byte` `Propose` already accepted, applied to every node's own store the instant an entry commits (`Node.SetStateMachine`, nil by default, no existing test affected). Deliberately scoped: `InstallSnapshot` still carries no real state-machine payload (a follow-up milestone, not this one, a user-confirmed scope decision), so a follower that catches up via `InstallSnapshot` rather than ordinary replication ends up with a state machine missing whatever writes happened in the gap it skipped, the Raft log itself stays fully correct either way; see [docs/architecture.md](docs/architecture.md) for the exact boundary. Proven end to end across three real, concurrently-running nodes, each with its own independent store that has to converge without sharing memory: `TestLeaderAppliesProposedEntriesToStateMachineAcrossRealNodes`.
+- **123 tests, all passing** (98 in `internal/raft`, 7 in `internal/kvstore`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner; there is no standalone server binary or client yet. See Roadmap.
 
 ## Architecture
 
-**Current state**: what's really running today. No client, no standalone process yet. `Node` instances can talk to each other over a real network (`GRPCTransport`/`GRPCServer`, real `google.golang.org/grpc` sockets) or an in-process fake, and persist through a real `Storage` implementation, still entirely orchestrated by Go's test runner, not a long-running binary.
+**Current state**: what's really running today. No client, no standalone process yet. `Node` instances can talk to each other over a real network (`GRPCTransport`/`GRPCServer`, real `google.golang.org/grpc` sockets) or an in-process fake, persist through a real `Storage` implementation, and apply committed writes to a real `StateMachine` (`internal/kvstore.Store`), still entirely orchestrated by Go's test runner, not a long-running binary.
 
 ```mermaid
 graph LR
@@ -66,12 +67,16 @@ graph LR
     end
     TP["Transport interface<br/>(fakeTransport/loopbackTransport in most tests,<br/>real GRPCTransport over TCP in internal/transport's tests)"]
     ST["Storage interface<br/>(fakeStorage in most tests,<br/>real FileStorage where persistence is tested)"]
+    SM["StateMachine interface<br/>(nil in most tests,<br/>real internal/kvstore.Store where applying is tested)"]
     N1 --> TP
     N2 --> TP
     N3 --> TP
     N1 --> ST
     N2 --> ST
     N3 --> ST
+    N1 --> SM
+    N2 --> SM
+    N3 --> SM
 ```
 
 **Target state**: the eventual system this is building toward. Not yet built; shown for direction, not to claim it exists.
@@ -108,6 +113,7 @@ graph TB
 | GitHub Actions | Free, native CI for a GitHub-hosted repo; runs build, `vet`, and race-detector tests on every push/PR. |
 | Go's standard `math/rand` (seeded) | `internal/sim`'s `SimTransport` draws every fault-injection decision (delay, drop) from one seeded `*rand.Rand`, so a fixed seed reproduces the same aggregate fault behavior without needing an external fuzzing framework. |
 | Go's standard `log/slog` | `Node.SetLogger` accepts a `*slog.Logger` directly, no custom logging interface invented; structured, leveled logging with pluggable output handlers (text, JSON, or a custom one) comes from the standard library alone. |
+| Go's standard `encoding/json` | `internal/kvstore`'s `Command`/`Op` encoding, the same reasoning `internal/storage.FileStorage` already chose JSON for: human-readable, standard-library only, and fast enough at this project's scale. |
 
 **Planned**
 
@@ -132,7 +138,8 @@ graph TB
 - [x] Cluster membership changes (`AddServer`/`RemoveServer`, one server at a time)
 - [x] Fault-injection testing (`internal/sim`'s seeded `SimTransport` + safety-invariant checking; a full virtual-time deterministic simulator remains a distinct, larger future step)
 - [x] Observability (structured logs via `log/slog`, `Node.Metrics()` counters; not yet exposed externally, no service exists to expose them from)
-- [ ] **State machine (the actual key-value store `Propose`d commands get applied to)** ← current
+- [x] State machine (`internal/kvstore.Store`, applied on every ordinary commit; `InstallSnapshot` still carries no real payload, a follow-up milestone, not this one)
+- [ ] **`InstallSnapshot` real state-machine payload (close the gap the state machine milestone deliberately left open)** ← current
 - [ ] Client API (gRPC `Get`/`Put`/`Delete`, the network layer that would call `Propose` from outside the process)
 - [ ] `cmd/` entrypoint (a real, runnable server binary; everything today runs only inside Go's test runner)
 - [ ] Sharding (stretch goal, past the core single-group KV store)
@@ -164,9 +171,13 @@ raftmage/
     │   ├── install_snapshot.go  # InstallSnapshot RPC: catches up a far-behind follower
     │   ├── membership.go        # AddServer/RemoveServer: one-server-at-a-time cluster membership changes
     │   ├── observability.go     # SetLogger (log/slog) + Metrics() counters
+    │   ├── state_machine.go     # StateMachine interface + the apply loop (commit -> applied)
     │   ├── transport.go         # Transport interface: the network dependency-inversion boundary
     │   ├── storage.go           # Storage interface: the persistence dependency-inversion boundary
-    │   └── *_test.go            # 90 tests, including six 3-node integration tests
+    │   └── *_test.go            # 98 tests, including seven 3-node integration tests
+    ├── kvstore/                 # the real, in-memory StateMachine implementation
+    │   ├── store.go             # Store: Put/Delete key-value store, JSON command encoding
+    │   └── store_test.go        # 7 tests
     ├── storage/                 # the real, disk-backed Storage implementation
     │   ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
     │   └── file_storage_test.go # 4 tests
@@ -217,6 +228,7 @@ go test ./internal/raft -run TestLeaderAddsServerAndReplicatesToNewMember -v
 go test ./internal/raft -run TestLeaderRemovesFollowerAndContinuesOperating -v
 go test ./internal/sim -run TestClusterMaintainsSafetyUnderRandomFaults -v
 go test ./internal/raft -run TestSetLoggerReceivesVoteGrantedLog -v
+go test ./internal/raft -run TestLeaderAppliesProposedEntriesToStateMachineAcrossRealNodes -v
 ```
 
 The last command's own test output includes a real `log/slog` structured log line (`node=... term=... role=... candidate=... msg="granted vote"`), the smallest possible look at what `Node.SetLogger` actually produces.
