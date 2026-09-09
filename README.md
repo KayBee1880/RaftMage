@@ -48,7 +48,8 @@ Principles this build has actually practiced, each one checkable against the com
 - **Real gRPC transport**: `GRPCTransport`/`GRPCServer` (`internal/transport`) implement the exact same `Transport` interface the consensus core already depends on, backed by real `google.golang.org/grpc` clients and servers instead of an in-process fake. Every RPC's wire format is generated from a `.proto` definition, not hand-rolled. Proven with three real nodes electing a leader and replicating a committed write over actual TCP sockets, not just an in-process call: `TestThreeNodeClusterElectsLeaderAndReplicatesOverRealGRPC`.
 - **Cluster membership changes (`Node.AddServer`/`Node.RemoveServer`)**: adds or removes one server at a time, the standard simplification (from Ongaro's Raft thesis) that avoids needing full joint consensus, since any two configurations differing by one member always share an overlapping majority. A configuration change is just another log entry (`EntryConfig`), replicated, retried, and committed by the exact same code path as an ordinary write, adopted the instant it's appended, not only once committed, per Raft's own rule. A leader that commits its own removal steps down automatically. Proven with real, concurrently-running nodes both growing a cluster (`TestLeaderAddsServerAndReplicatesToNewMember`, a brand new node joins and catches up on replication) and shrinking one (`TestLeaderRemovesFollowerAndContinuesOperating`, the remaining nodes keep functioning correctly).
 - **Fault-injection testing (`internal/sim`)**: `SimTransport` wraps real `Node`s in a seeded random fault injector, random per-message delay, random message drops, and node isolation/restore, so a fixed seed reproduces the same aggregate fault behavior across runs. Not a virtual-time deterministic simulator (real goroutines and real wall-clock scheduling still introduce some nondeterminism in exactly which message draws which random outcome, an honestly stated gap, not a claim this project makes); see [docs/architecture.md](docs/architecture.md) for the precise boundary. Its flagship test, `TestClusterMaintainsSafetyUnderRandomFaults`, runs a real 5-node cluster for 3 seconds under continuous random delay, drops, and single-node isolation while proposing writes, and checks two Raft safety properties on every poll, not just at the end: election safety (never two leaders in the same term) and state machine safety (no two nodes ever disagree about a committed entry).
-- **99 tests, all passing** (81 in `internal/raft`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Observability (structured logs + metrics)**: `Node.SetLogger` attaches a standard-library `*slog.Logger` (nil by default, so every existing test is unaffected) that emits one structured log line per state transition, elections starting/won/lost, votes granted/denied with a reason, stepping down to follower, log compaction, snapshot installs, membership changes, proposed entries, never on routine per-heartbeat traffic. `Node.Metrics()` returns a small counter snapshot (elections, votes, entries proposed/committed, compactions, snapshots installed, membership changes) incremented at the same points. Deliberately a library feature, not a running service: no `cmd/` binary or HTTP `/metrics` endpoint exists yet to expose either one externally, an honest boundary, not an oversight; see [docs/architecture.md](docs/architecture.md).
+- **108 tests, all passing** (90 in `internal/raft`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
 Everything above runs today only inside Go's test runner; there is no standalone server binary or client yet. See Roadmap.
 
@@ -106,13 +107,14 @@ graph TB
 | gRPC + Protocol Buffers | `internal/transport`'s real `GRPCTransport`/`GRPCServer`, generated from `internal/transport/raftpb/raft.proto`; a wire format independent of Go, already carrying cluster-membership changes over the wire and ready for the eventual `Client API` to build on too. |
 | GitHub Actions | Free, native CI for a GitHub-hosted repo; runs build, `vet`, and race-detector tests on every push/PR. |
 | Go's standard `math/rand` (seeded) | `internal/sim`'s `SimTransport` draws every fault-injection decision (delay, drop) from one seeded `*rand.Rand`, so a fixed seed reproduces the same aggregate fault behavior without needing an external fuzzing framework. |
+| Go's standard `log/slog` | `Node.SetLogger` accepts a `*slog.Logger` directly, no custom logging interface invented; structured, leveled logging with pluggable output handlers (text, JSON, or a custom one) comes from the standard library alone. |
 
 **Planned**
 
 | Component | Milestone |
 |---|---|
 | Virtual-time deterministic simulator | A distinct, larger step past `internal/sim`'s current seeded-fault-injection-over-real-time approach |
-| Structured logs + metrics | Observability |
+| Metrics/log exposition (HTTP `/metrics`, log shipping) | Needs the `cmd/`/`Client API` milestone first; there's no running service yet to expose them from |
 
 ## Roadmap
 
@@ -129,7 +131,10 @@ graph TB
 - [x] Real gRPC transport
 - [x] Cluster membership changes (`AddServer`/`RemoveServer`, one server at a time)
 - [x] Fault-injection testing (`internal/sim`'s seeded `SimTransport` + safety-invariant checking; a full virtual-time deterministic simulator remains a distinct, larger future step)
-- [ ] **Observability (structured logs, metrics)** ← current
+- [x] Observability (structured logs via `log/slog`, `Node.Metrics()` counters; not yet exposed externally, no service exists to expose them from)
+- [ ] **State machine (the actual key-value store `Propose`d commands get applied to)** ← current
+- [ ] Client API (gRPC `Get`/`Put`/`Delete`, the network layer that would call `Propose` from outside the process)
+- [ ] `cmd/` entrypoint (a real, runnable server binary; everything today runs only inside Go's test runner)
 - [ ] Sharding (stretch goal, past the core single-group KV store)
 
 Fuller status, including what's implemented vs. planned per component: [docs/architecture.md](docs/architecture.md).
@@ -158,9 +163,10 @@ raftmage/
     │   ├── compact.go           # Node.Compact: log compaction, bounded only by commitIndex
     │   ├── install_snapshot.go  # InstallSnapshot RPC: catches up a far-behind follower
     │   ├── membership.go        # AddServer/RemoveServer: one-server-at-a-time cluster membership changes
+    │   ├── observability.go     # SetLogger (log/slog) + Metrics() counters
     │   ├── transport.go         # Transport interface: the network dependency-inversion boundary
     │   ├── storage.go           # Storage interface: the persistence dependency-inversion boundary
-    │   └── *_test.go            # 81 tests, including six 3-node integration tests
+    │   └── *_test.go            # 90 tests, including six 3-node integration tests
     ├── storage/                 # the real, disk-backed Storage implementation
     │   ├── file_storage.go      # FileStorage: atomic JSON-snapshot persistence to disk
     │   └── file_storage_test.go # 4 tests
@@ -210,7 +216,10 @@ go test ./internal/transport -run TestThreeNodeClusterElectsLeaderAndReplicatesO
 go test ./internal/raft -run TestLeaderAddsServerAndReplicatesToNewMember -v
 go test ./internal/raft -run TestLeaderRemovesFollowerAndContinuesOperating -v
 go test ./internal/sim -run TestClusterMaintainsSafetyUnderRandomFaults -v
+go test ./internal/raft -run TestSetLoggerReceivesVoteGrantedLog -v
 ```
+
+The last command's own test output includes a real `log/slog` structured log line (`node=... term=... role=... candidate=... msg="granted vote"`), the smallest possible look at what `Node.SetLogger` actually produces.
 
 ## Documentation
 
