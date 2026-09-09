@@ -47,6 +47,7 @@ func (n *Node) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapshotRe
 	n.persistStateLocked()
 	n.metrics.SnapshotsInstalled++
 	n.logLocked("installed snapshot", "lastIncludedIndex", args.LastIncludedIndex)
+	n.applyCommittedLocked()
 
 	return InstallSnapshotReply{Term: n.currentTerm}
 }

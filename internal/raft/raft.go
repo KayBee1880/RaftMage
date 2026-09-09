@@ -45,10 +45,11 @@ type LogEntry struct {
 type Node struct {
 	mu sync.Mutex
 
-	id         string
-	baseConfig []string
-	transport  Transport
-	storage    Storage
+	id           string
+	baseConfig   []string
+	transport    Transport
+	storage      Storage
+	stateMachine StateMachine
 
 	role Role
 

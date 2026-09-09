@@ -44,6 +44,7 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		newCommitIndex := min(args.LeaderCommit, n.lastLogIndexLocked())
 		n.metrics.EntriesCommitted += newCommitIndex - n.commitIndex
 		n.commitIndex = newCommitIndex
+		n.applyCommittedLocked()
 	}
 
 	return AppendEntriesReply{Term: n.currentTerm, Success: true}
@@ -240,6 +241,7 @@ func (n *Node) advanceCommitIndexLocked(term uint64) {
 				n.role = Follower
 				n.logLocked("stepped down after committing own removal")
 			}
+			n.applyCommittedLocked()
 			return
 		}
 	}

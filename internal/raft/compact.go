@@ -32,6 +32,7 @@ func (n *Node) Compact(upToIndex uint64) error {
 	n.persistStateLocked()
 	n.metrics.LogCompactions++
 	n.logLocked("compacted log", "upToIndex", upToIndex)
+	n.applyCommittedLocked()
 
 	return nil
 }
