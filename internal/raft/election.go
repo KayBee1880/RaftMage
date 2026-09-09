@@ -23,20 +23,28 @@ func (n *Node) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 	}
 
 	if args.Term < n.currentTerm {
+		n.metrics.VotesDenied++
+		n.logLocked("denied vote", "candidate", args.CandidateID, "reason", "stale term")
 		return RequestVoteReply{Term: n.currentTerm, VoteGranted: false}
 	}
 
 	if n.votedFor != "" && n.votedFor != args.CandidateID {
+		n.metrics.VotesDenied++
+		n.logLocked("denied vote", "candidate", args.CandidateID, "reason", "already voted")
 		return RequestVoteReply{Term: n.currentTerm, VoteGranted: false}
 	}
 
 	if !n.candidateLogIsUpToDateLocked(args.LastLogIndex, args.LastLogTerm) {
+		n.metrics.VotesDenied++
+		n.logLocked("denied vote", "candidate", args.CandidateID, "reason", "log not up to date")
 		return RequestVoteReply{Term: n.currentTerm, VoteGranted: false}
 	}
 
 	n.votedFor = args.CandidateID
 	n.persistStateLocked()
 	n.electionResetAt = time.Now()
+	n.metrics.VotesGranted++
+	n.logLocked("granted vote", "candidate", args.CandidateID)
 	return RequestVoteReply{Term: n.currentTerm, VoteGranted: true}
 }
 
@@ -47,6 +55,8 @@ func (n *Node) StartElection() {
 	term := n.currentTerm
 	n.votedFor = n.id
 	n.persistStateLocked()
+	n.metrics.ElectionsStarted++
+	n.logLocked("starting election")
 	args := RequestVoteArgs{
 		Term:         term,
 		CandidateID:  n.id,
@@ -95,12 +105,15 @@ func (n *Node) StartElection() {
 	if votes >= votesNeeded {
 		n.role = Leader
 		n.initLeaderStateLocked()
+		n.metrics.ElectionsWon++
+		n.logLocked("won election", "votes", votes)
 		if n.running {
 			go n.runHeartbeats(term)
 		}
 		return
 	}
 	n.electionResetAt = time.Now()
+	n.logLocked("election lost, retrying", "votes", votes)
 	if n.running {
 		go n.runElectionTimer(term)
 	}
@@ -112,6 +125,7 @@ func (n *Node) becomeFollowerLocked(term uint64) {
 	n.votedFor = ""
 	n.persistStateLocked()
 	n.electionResetAt = time.Now()
+	n.logLocked("stepping down to follower")
 	if n.running {
 		go n.runElectionTimer(term)
 	}

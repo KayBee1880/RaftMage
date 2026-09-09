@@ -41,9 +41,12 @@ func (n *Node) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapshotRe
 	n.lastIncludedTerm = args.LastIncludedTerm
 	n.baseConfig = filterOut(args.Config, n.id)
 	if n.commitIndex < args.LastIncludedIndex {
+		n.metrics.EntriesCommitted += args.LastIncludedIndex - n.commitIndex
 		n.commitIndex = args.LastIncludedIndex
 	}
 	n.persistStateLocked()
+	n.metrics.SnapshotsInstalled++
+	n.logLocked("installed snapshot", "lastIncludedIndex", args.LastIncludedIndex)
 
 	return InstallSnapshotReply{Term: n.currentTerm}
 }

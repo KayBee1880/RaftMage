@@ -10,6 +10,8 @@ func (n *Node) Propose(command []byte) (index uint64, term uint64, isLeader bool
 	n.log = append(n.log, LogEntry{Term: term, Command: command})
 	index = n.lastLogIndexLocked()
 	n.persistStateLocked()
+	n.metrics.EntriesProposed++
+	n.logLocked("proposed entry", "index", index, "commandBytes", len(command))
 	n.advanceCommitIndexLocked(term)
 	n.mu.Unlock()
 

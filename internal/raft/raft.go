@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -68,6 +69,9 @@ type Node struct {
 	running         bool
 	ctx             context.Context
 	cancel          context.CancelFunc
+
+	logger  *slog.Logger
+	metrics Metrics
 }
 
 func NewNode(id string, peers []string, transport Transport, storage Storage) *Node {

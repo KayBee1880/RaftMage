@@ -41,7 +41,9 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	}
 
 	if args.LeaderCommit > n.commitIndex {
-		n.commitIndex = min(args.LeaderCommit, n.lastLogIndexLocked())
+		newCommitIndex := min(args.LeaderCommit, n.lastLogIndexLocked())
+		n.metrics.EntriesCommitted += newCommitIndex - n.commitIndex
+		n.commitIndex = newCommitIndex
 	}
 
 	return AppendEntriesReply{Term: n.currentTerm, Success: true}
@@ -231,10 +233,12 @@ func (n *Node) advanceCommitIndexLocked(term uint64) {
 			}
 		}
 		if replicated*2 > len(members)+1 {
+			n.metrics.EntriesCommitted += N - n.commitIndex
 			n.commitIndex = N
 			entry := n.log[N-n.lastIncludedIndex-1]
 			if n.role == Leader && entry.Type == EntryConfig && !containsString(entry.Config, n.id) {
 				n.role = Follower
+				n.logLocked("stepped down after committing own removal")
 			}
 			return
 		}

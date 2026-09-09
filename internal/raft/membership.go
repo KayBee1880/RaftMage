@@ -52,6 +52,8 @@ func (n *Node) appendConfigEntryLocked(config []string) (index, term uint64) {
 	index = n.lastLogIndexLocked()
 	n.persistStateLocked()
 	n.reconcileLeaderStateForConfigChangeLocked()
+	n.metrics.MembershipChanges++
+	n.logLocked("proposed membership change", "config", config)
 	n.advanceCommitIndexLocked(term)
 	return index, term
 }
