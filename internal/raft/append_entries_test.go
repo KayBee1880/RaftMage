@@ -387,3 +387,13 @@ func TestAdvanceCommitIndexLockedNeverCommitsAnEarlierTermEntryDirectly(t *testi
 		t.Fatalf("commitIndex = %d, want 0: entries are from term 1, not the leader's current term 2, so a majority alone must not commit them", n.commitIndex)
 	}
 }
+
+func TestHandleAppendEntriesSetsCurrentLeader(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
+
+	n.HandleAppendEntries(AppendEntriesArgs{Term: 1, LeaderID: "node-2"})
+
+	if got := n.CurrentLeader(); got != "node-2" {
+		t.Fatalf("CurrentLeader() = %q, want %q", got, "node-2")
+	}
+}

@@ -238,3 +238,27 @@ func TestStartElectionIgnoresTransportErrors(t *testing.T) {
 		t.Fatalf("role = %v, want %v", got, Leader)
 	}
 }
+
+func TestStartElectionSetsCurrentLeaderToSelfOnWin(t *testing.T) {
+	n := NewNode("node-1", nil, nil, nil)
+
+	n.StartElection()
+
+	if got := n.CurrentLeader(); got != "node-1" {
+		t.Fatalf("CurrentLeader() = %q, want %q", got, "node-1")
+	}
+}
+
+func TestBecomeFollowerLockedClearsCurrentLeader(t *testing.T) {
+	n := NewNode("node-1", nil, nil, nil)
+	n.StartElection()
+	if n.CurrentLeader() != "node-1" {
+		t.Fatalf("expected CurrentLeader() to be set after winning the election")
+	}
+
+	n.HandleRequestVote(RequestVoteArgs{Term: 2, CandidateID: "node-2"})
+
+	if got := n.CurrentLeader(); got != "" {
+		t.Fatalf("CurrentLeader() = %q, want empty after discovering a higher term with no leader known yet", got)
+	}
+}

@@ -312,6 +312,9 @@ func TestLeaderStepsDownAfterCommittingSelfRemoval(t *testing.T) {
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if n.Role() == Follower && n.CommitIndex() == index {
+			if got := n.CurrentLeader(); got != "" {
+				t.Fatalf("CurrentLeader() = %q, want empty after stepping down from self-removal", got)
+			}
 			return
 		}
 		time.Sleep(2 * time.Millisecond)

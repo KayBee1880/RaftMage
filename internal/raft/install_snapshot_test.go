@@ -158,3 +158,18 @@ func TestHandleInstallSnapshotPersistsState(t *testing.T) {
 		t.Fatalf("last persisted state = %+v, want LastIncludedIndex=3 LastIncludedTerm=1", last)
 	}
 }
+
+func TestHandleInstallSnapshotSetsCurrentLeader(t *testing.T) {
+	n := NewNode("node-1", []string{"node-2"}, nil, nil)
+
+	n.HandleInstallSnapshot(InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  1,
+	})
+
+	if got := n.CurrentLeader(); got != "node-2" {
+		t.Fatalf("CurrentLeader() = %q, want %q", got, "node-2")
+	}
+}
