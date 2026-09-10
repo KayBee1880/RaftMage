@@ -51,7 +51,8 @@ type Node struct {
 	storage      Storage
 	stateMachine StateMachine
 
-	role Role
+	role          Role
+	currentLeader string
 
 	currentTerm uint64
 	votedFor    string
@@ -142,6 +143,12 @@ func (n *Node) VotedFor() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.votedFor
+}
+
+func (n *Node) CurrentLeader() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.currentLeader
 }
 
 func (n *Node) CommitIndex() uint64 {

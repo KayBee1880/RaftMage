@@ -54,6 +54,7 @@ func (n *Node) StartElection() {
 	n.currentTerm++
 	term := n.currentTerm
 	n.votedFor = n.id
+	n.currentLeader = ""
 	n.persistStateLocked()
 	n.metrics.ElectionsStarted++
 	n.logLocked("starting election")
@@ -104,6 +105,7 @@ func (n *Node) StartElection() {
 	}
 	if votes >= votesNeeded {
 		n.role = Leader
+		n.currentLeader = n.id
 		n.initLeaderStateLocked()
 		n.metrics.ElectionsWon++
 		n.logLocked("won election", "votes", votes)
@@ -123,6 +125,7 @@ func (n *Node) becomeFollowerLocked(term uint64) {
 	n.role = Follower
 	n.currentTerm = term
 	n.votedFor = ""
+	n.currentLeader = ""
 	n.persistStateLocked()
 	n.electionResetAt = time.Now()
 	n.logLocked("stepping down to follower")

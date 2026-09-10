@@ -30,6 +30,7 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		n.becomeFollowerLocked(args.Term)
 	}
 	n.electionResetAt = time.Now()
+	n.currentLeader = args.LeaderID
 
 	if args.PrevLogIndex < n.lastIncludedIndex || args.PrevLogIndex > n.lastLogIndexLocked() || n.logTermAtLocked(args.PrevLogIndex) != args.PrevLogTerm {
 		return AppendEntriesReply{Term: n.currentTerm, Success: false}
@@ -240,6 +241,7 @@ func (n *Node) advanceCommitIndexLocked(term uint64) {
 			entry := n.log[N-n.lastIncludedIndex-1]
 			if n.role == Leader && entry.Type == EntryConfig && !containsString(entry.Config, n.id) {
 				n.role = Follower
+				n.currentLeader = ""
 				n.logLocked("stepped down after committing own removal")
 			}
 			n.applyCommittedLocked()

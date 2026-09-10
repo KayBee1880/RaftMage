@@ -27,6 +27,7 @@ func (n *Node) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapshotRe
 		n.becomeFollowerLocked(args.Term)
 	}
 	n.electionResetAt = time.Now()
+	n.currentLeader = args.LeaderID
 
 	if args.LastIncludedIndex <= n.lastIncludedIndex {
 		return InstallSnapshotReply{Term: n.currentTerm}
