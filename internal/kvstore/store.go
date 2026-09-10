@@ -63,3 +63,23 @@ func (s *Store) Get(key string) ([]byte, bool) {
 	}
 	return append([]byte(nil), value...), true
 }
+
+func (s *Store) Snapshot() ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return json.Marshal(s.data)
+}
+
+func (s *Store) Restore(data []byte) error {
+	restored := make(map[string][]byte)
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &restored); err != nil {
+			return err
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = restored
+	return nil
+}

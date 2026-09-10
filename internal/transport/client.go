@@ -109,6 +109,7 @@ func (t *GRPCTransport) SendInstallSnapshot(peer string, args raft.InstallSnapsh
 		LastIncludedIndex: args.LastIncludedIndex,
 		LastIncludedTerm:  args.LastIncludedTerm,
 		Config:            args.Config,
+		Data:              args.Data,
 	})
 	if err != nil {
 		return raft.InstallSnapshotReply{}, err

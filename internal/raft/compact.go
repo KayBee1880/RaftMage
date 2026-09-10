@@ -26,6 +26,14 @@ func (n *Node) Compact(upToIndex uint64) error {
 		}
 	}
 
+	if n.stateMachine != nil && n.lastApplied >= upToIndex {
+		snapshot, err := n.stateMachine.Snapshot()
+		if err != nil {
+			panic("raft: failed to snapshot state machine: " + err.Error())
+		}
+		n.stateMachineSnapshot = snapshot
+	}
+
 	n.lastIncludedIndex = upToIndex
 	n.lastIncludedTerm = lastIncludedTerm
 	n.log = remaining

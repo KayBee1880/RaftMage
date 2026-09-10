@@ -56,6 +56,7 @@ func (s *GRPCServer) InstallSnapshot(_ context.Context, req *raftpb.InstallSnaps
 		LastIncludedIndex: req.GetLastIncludedIndex(),
 		LastIncludedTerm:  req.GetLastIncludedTerm(),
 		Config:            req.GetConfig(),
+		Data:              req.GetData(),
 	})
 	return &raftpb.InstallSnapshotReply{Term: reply.Term}, nil
 }

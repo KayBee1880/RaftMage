@@ -54,6 +54,7 @@ message InstallSnapshotRequest {
   uint64 last_included_index = 3;
   uint64 last_included_term = 4;
   repeated string config = 5;
+  bytes data = 6;
 }
 
 message InstallSnapshotReply {

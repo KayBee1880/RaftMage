@@ -193,6 +193,7 @@ func (n *Node) sendInstallSnapshot(term uint64, peer string) bool {
 		LastIncludedIndex: n.lastIncludedIndex,
 		LastIncludedTerm:  n.lastIncludedTerm,
 		Config:            n.currentFullConfigLocked(),
+		Data:              n.stateMachineSnapshot,
 	}
 	transport := n.transport
 	n.mu.Unlock()

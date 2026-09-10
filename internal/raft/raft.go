@@ -57,8 +57,9 @@ type Node struct {
 	votedFor    string
 	log         []LogEntry
 
-	lastIncludedIndex uint64
-	lastIncludedTerm  uint64
+	lastIncludedIndex    uint64
+	lastIncludedTerm     uint64
+	stateMachineSnapshot []byte
 
 	commitIndex uint64
 	lastApplied uint64
@@ -98,6 +99,7 @@ func NewNode(id string, peers []string, transport Transport, storage Storage) *N
 		n.log = state.Log
 		n.lastIncludedIndex = state.LastIncludedIndex
 		n.lastIncludedTerm = state.LastIncludedTerm
+		n.stateMachineSnapshot = state.StateMachineSnapshot
 		if state.BaseConfig != nil {
 			n.baseConfig = state.BaseConfig
 		}
@@ -111,12 +113,13 @@ func (n *Node) persistStateLocked() {
 		return
 	}
 	state := PersistentState{
-		CurrentTerm:       n.currentTerm,
-		VotedFor:          n.votedFor,
-		Log:               n.log,
-		LastIncludedIndex: n.lastIncludedIndex,
-		LastIncludedTerm:  n.lastIncludedTerm,
-		BaseConfig:        n.baseConfig,
+		CurrentTerm:          n.currentTerm,
+		VotedFor:             n.votedFor,
+		Log:                  n.log,
+		LastIncludedIndex:    n.lastIncludedIndex,
+		LastIncludedTerm:     n.lastIncludedTerm,
+		BaseConfig:           n.baseConfig,
+		StateMachineSnapshot: n.stateMachineSnapshot,
 	}
 	if err := n.storage.Save(state); err != nil {
 		panic("raft: failed to persist state: " + err.Error())

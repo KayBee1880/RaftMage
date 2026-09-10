@@ -2,12 +2,15 @@ package raft
 
 type StateMachine interface {
 	Apply(command []byte) error
+	Snapshot() ([]byte, error)
+	Restore(data []byte) error
 }
 
 func (n *Node) SetStateMachine(sm StateMachine) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.stateMachine = sm
+	n.applyCommittedLocked()
 }
 
 func (n *Node) LastApplied() uint64 {
@@ -18,6 +21,11 @@ func (n *Node) LastApplied() uint64 {
 
 func (n *Node) applyCommittedLocked() {
 	if n.lastApplied < n.lastIncludedIndex {
+		if n.stateMachine != nil {
+			if err := n.stateMachine.Restore(n.stateMachineSnapshot); err != nil {
+				panic("raft: failed to restore state machine snapshot: " + err.Error())
+			}
+		}
 		n.lastApplied = n.lastIncludedIndex
 	}
 	if n.stateMachine == nil {
