@@ -4,6 +4,7 @@ import (
 	"net"
 	"testing"
 
+	"raftmage/internal/kvstore"
 	"raftmage/internal/raft"
 )
 
@@ -75,6 +76,8 @@ func TestGRPCTransportSendAppendEntriesRoundTrips(t *testing.T) {
 func TestGRPCTransportSendInstallSnapshotRoundTrips(t *testing.T) {
 	node := raft.NewNode("node-1", nil, nil, nil)
 	node.HandleRequestVote(raft.RequestVoteArgs{Term: 1, CandidateID: "node-2"})
+	store := kvstore.NewStore()
+	node.SetStateMachine(store)
 
 	addr, stop := startTestServer(t, node)
 	defer stop()
@@ -82,11 +85,22 @@ func TestGRPCTransportSendInstallSnapshotRoundTrips(t *testing.T) {
 	transport := NewGRPCTransport(map[string]string{"node-1": addr})
 	defer transport.Close()
 
+	putCmd, _ := kvstore.EncodeCommand(kvstore.Command{Op: kvstore.OpPut, Key: "x", Value: []byte("1")})
+	seeded := kvstore.NewStore()
+	if err := seeded.Apply(putCmd); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+	snapshot, err := seeded.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot failed: %v", err)
+	}
+
 	reply, err := transport.SendInstallSnapshot("node-1", raft.InstallSnapshotArgs{
 		Term:              1,
 		LeaderID:          "node-2",
 		LastIncludedIndex: 5,
 		LastIncludedTerm:  1,
+		Data:              snapshot,
 	})
 	if err != nil {
 		t.Fatalf("SendInstallSnapshot returned error: %v", err)
@@ -96,6 +110,9 @@ func TestGRPCTransportSendInstallSnapshotRoundTrips(t *testing.T) {
 	}
 	if node.CommitIndex() != 5 {
 		t.Fatalf("expected commit index 5 after InstallSnapshot, got %d", node.CommitIndex())
+	}
+	if got, ok := store.Get("x"); !ok || string(got) != "1" {
+		t.Fatalf("store.Get(\"x\") = (%q, %v), want (\"1\", true); the snapshot payload did not survive the real gRPC round trip", got, ok)
 	}
 }
 

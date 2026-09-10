@@ -90,3 +90,50 @@ func TestStoreGetReturnsACopyNotSharedMemory(t *testing.T) {
 		t.Fatalf("stored value was mutated via a previously returned Get() slice, got %q", again)
 	}
 }
+
+func TestStoreSnapshotRestoreRoundTrips(t *testing.T) {
+	s := NewStore()
+	put, _ := EncodeCommand(Command{Op: OpPut, Key: "x", Value: []byte("1")})
+	if err := s.Apply(put); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	snapshot, err := s.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot failed: %v", err)
+	}
+
+	restored := NewStore()
+	if err := restored.Restore(snapshot); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+
+	got, ok := restored.Get("x")
+	if !ok || string(got) != "1" {
+		t.Fatalf("restored Get(\"x\") = (%q, %v), want (\"1\", true)", got, ok)
+	}
+}
+
+func TestStoreRestoreOnEmptyDataYieldsEmptyStore(t *testing.T) {
+	s := NewStore()
+	put, _ := EncodeCommand(Command{Op: OpPut, Key: "x", Value: []byte("1")})
+	if err := s.Apply(put); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	if err := s.Restore(nil); err != nil {
+		t.Fatalf("Restore(nil) failed: %v", err)
+	}
+
+	if _, ok := s.Get("x"); ok {
+		t.Fatal("expected Restore(nil) to clear any pre-existing state")
+	}
+}
+
+func TestStoreRestoreRejectsMalformedData(t *testing.T) {
+	s := NewStore()
+
+	if err := s.Restore([]byte("not json")); err == nil {
+		t.Fatal("expected Restore to return an error for malformed data")
+	}
+}
