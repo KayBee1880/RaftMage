@@ -51,61 +51,38 @@ Principles this build has actually practiced, each one checkable against the com
 - **Observability (structured logs + metrics)**: `Node.SetLogger` attaches a standard-library `*slog.Logger` (nil by default, so every existing test is unaffected) that emits one structured log line per state transition, elections starting/won/lost, votes granted/denied with a reason, stepping down to follower, log compaction, snapshot installs, membership changes, proposed entries, never on routine per-heartbeat traffic. `Node.Metrics()` returns a small counter snapshot (elections, votes, entries proposed/committed, compactions, snapshots installed, membership changes) incremented at the same points. Deliberately a library feature, not a running service: no `cmd/` binary or HTTP `/metrics` endpoint exists yet to expose either one externally, an honest boundary, not an oversight; see [docs/architecture.md](docs/architecture.md).
 - **State machine (`internal/kvstore.Store`)**: a real, in-memory key-value store, `Put`/`Delete` commands JSON-encoded into the same opaque `[]byte` `Propose` already accepted, applied to every node's own store the instant an entry commits (`Node.SetStateMachine`, nil by default, no existing test affected). `StateMachine` also has `Snapshot()`/`Restore()`, so `Compact` captures a real snapshot and `InstallSnapshot` carries it to a far-behind follower, and a node that restarts after ever compacting restores its own state machine from disk too, closing what was originally a deliberately scoped, named gap in a follow-up milestone rather than left open. Proven end to end across three real, concurrently-running nodes, each with its own independent store that has to converge without sharing memory: `TestLeaderAppliesProposedEntriesToStateMachineAcrossRealNodes`.
 - **Client API (gRPC `Get`/`Put`/`Delete`, `internal/clientapi`)**: the first network surface for anything outside the cluster's own peers, a genuinely separate `KV` gRPC service from the peer-to-peer `Raft` one, wire format generated from its own `.proto` file. `Put`/`Delete` call `Propose` and then wait for the entry to actually be applied (`Node.LastApplied()` reaching the proposed index), not just accepted by the leader, so a successful reply means the same thing this project's own stated guarantee means everywhere else. Rejected on a non-leader with a `codes.FailedPrecondition` status naming `Node.CurrentLeader()` (a new accessor, tracking the last known leader from every legitimate `AppendEntries`/`InstallSnapshot`/election win) as a retry hint when one is known. Uses the caller's own gRPC request context for cancellation, a `codes.DeadlineExceeded` status if it expires before commitment, rather than inventing a fixed timeout the way the peer transport layer had to. `Get` reads directly from the local node's attached store, no leader check, no waiting, an explicitly eventually-consistent read, matching `internal/kvstore`'s own already-stated limitation, not a stronger guarantee than what's actually implemented. Proven end to end with three real nodes and a real gRPC client reaching a real leader over TCP: `TestThreeNodeClusterCommitsPutOverRealGRPCClientAPI`.
-- **140 tests, all passing** (105 in `internal/raft`, 10 in `internal/kvstore`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`, 7 in `internal/clientapi`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **A real, runnable server binary (`cmd/raftmaged`)**: reads `-id`/`-raft-addr`/`-client-addr`/`-peers`/`-data-file` flags, wires up a real `*raft.Node` with its peer `Transport`, `Storage`, and `StateMachine`, starts both the peer-to-peer `Raft` gRPC server and the client-facing `KV` gRPC server, calls `Node.Run()`, and shuts down gracefully on `SIGINT`/`SIGTERM`. No config file, no bundled client, deliberately: the smaller of two options put to the user directly, matching this project's repeated preference for a staged, named-limitation slice over a larger combined one. This is the first thing in this project runnable with `go run`, not just `go test`.
+- **146 tests, all passing** (105 in `internal/raft`, 10 in `internal/kvstore`, 4 in `internal/storage`, 6 in `internal/transport`, 8 in `internal/sim`, 7 in `internal/clientapi`, 6 in `cmd/raftmaged`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
-A cluster can now be written to and read from over a real network connection, `internal/clientapi`'s tests are proof, but there is still no standalone server binary: every node, transport, and client in this project is still wired up and torn down entirely inside Go's test runner. See Roadmap.
+A cluster can now be started, written to, and read from as a real, standalone process, not just inside Go's test runner. See Roadmap.
 
 ## Architecture
 
-**Current state**: what's really running today. A real client can now reach a real cluster over gRPC, `internal/clientapi`'s `KV` service, but there's still no standalone process to run it from: `Node` instances, their peer-to-peer transport, and this new client-facing service are all still started and stopped entirely inside Go's test runner, not a long-running binary. `Node` instances talk to each other over a real network (`GRPCTransport`/`GRPCServer`, real `google.golang.org/grpc` sockets) or an in-process fake, persist through a real `Storage` implementation, apply committed writes to a real `StateMachine` (`internal/kvstore.Store`), and, new this milestone, can be reached directly by an external gRPC client through `internal/clientapi.GRPCServer`, a second, separate gRPC service from the peer-to-peer one.
+**Current state**: what's really running today. `cmd/raftmaged` is a real, standalone binary now: run one instance per node (see Local setup below for exact commands), each wired up with a real peer `Transport` (`GRPCTransport`/`GRPCServer`, real `google.golang.org/grpc` sockets), a real `Storage` (`FileStorage`, when `-data-file` is given), a real `StateMachine` (`internal/kvstore.Store`), and a real client-facing `KV` service (`internal/clientapi.GRPCServer`), a second, separate gRPC service from the peer-to-peer one. Every internal component this diagram shows has existed since an earlier milestone; what's new is that a real OS process, not Go's test runner, is what starts and stops them now.
 
 ```mermaid
 graph LR
     Client["gRPC client<br/>(kvpb.KVClient)"]
-    subgraph "Driven entirely by Go tests, no standalone binary yet"
+    subgraph "cmd/raftmaged (one real OS process per node)"
         CA["internal/clientapi.GRPCServer<br/>(KV service: Get/Put/Delete)"]
-        N1["Node"]
-        N2["Node"]
-        N3["Node"]
+        N["Node"]
     end
-    TP["Transport interface<br/>(fakeTransport/loopbackTransport in most tests,<br/>real GRPCTransport over TCP in internal/transport's tests)"]
-    ST["Storage interface<br/>(fakeStorage in most tests,<br/>real FileStorage where persistence is tested)"]
-    SM["StateMachine interface<br/>(nil in most tests,<br/>real internal/kvstore.Store where applying is tested)"]
+    TP["Transport interface<br/>(real GRPCTransport over TCP)"]
+    ST["Storage interface<br/>(real FileStorage, if -data-file is set)"]
+    SM["StateMachine interface<br/>(real internal/kvstore.Store)"]
+    Peer1["Peer raftmaged process"]
+    Peer2["Peer raftmaged process"]
     Client --> CA
-    CA --> N1
-    N1 --> TP
-    N2 --> TP
-    N3 --> TP
-    N1 --> ST
-    N2 --> ST
-    N3 --> ST
-    N1 --> SM
-    N2 --> SM
-    N3 --> SM
+    CA --> N
     CA --> SM
+    N --> TP
+    N --> ST
+    N --> SM
+    TP <--> Peer1
+    TP <--> Peer2
 ```
 
-**Target state**: the eventual system this is building toward. Every piece inside the box below now exists as real, tested Go code; what's still missing is the box itself, a single long-running process wiring them all up and listening on real ports without a test runner driving it. Shown for direction, not to claim the binary exists yet.
-
-```mermaid
-graph TB
-    Client["Client"]
-    subgraph Node["RaftMage Node (cmd/ binary still planned)"]
-        API["Client API<br/>(gRPC: Get / Put / Delete)"]
-        Raft["Raft Core<br/>(election + full log replication)"]
-        Storage["Storage<br/>(write-ahead log + snapshots)"]
-        SM["State Machine<br/>(the key-value store)"]
-        Transport["Transport<br/>(gRPC)"]
-    end
-    Peer1["Peer Node"]
-    Peer2["Peer Node"]
-    Client --> API --> Raft
-    Raft --> Storage
-    Raft --> SM
-    Raft --> Transport
-    Transport <--> Peer1
-    Transport <--> Peer2
-```
+**Target state**: the diagram above *is* the target state for a single-group cluster now, not an aspiration shown for direction, the `cmd/raftmaged` milestone was the last piece of it. The one remaining gap beyond this diagram is sharding, splitting the keyspace across more than one independent Raft group, an explicit stretch goal past the core single-group KV store this project set out to build, not something the diagram above was ever meant to show.
 
 ## Tech stack
 
@@ -147,8 +124,8 @@ graph TB
 - [x] State machine (`internal/kvstore.Store`, applied on every ordinary commit)
 - [x] `InstallSnapshot` real state-machine payload (`StateMachine.Snapshot`/`Restore`, `Compact` captures it, the RPC carries it; also fixed a related gap, restoring the state machine after a restart that followed compaction)
 - [x] Client API (gRPC `Get`/`Put`/`Delete`, `internal/clientapi`; waits for real commitment, not just leader acceptance, and gives a rejected write a `Node.CurrentLeader()` retry hint)
-- [ ] `cmd/` entrypoint (a real, runnable server binary; everything today runs only inside Go's test runner) ← current
-- [ ] Sharding (stretch goal, past the core single-group KV store)
+- [x] `cmd/` entrypoint (`cmd/raftmaged`, a real, runnable server binary configured entirely via CLI flags; graceful shutdown on `SIGINT`/`SIGTERM`)
+- [ ] Sharding (stretch goal, past the core single-group KV store) ← current, and the only remaining item
 
 Fuller status, including what's implemented vs. planned per component: [docs/architecture.md](docs/architecture.md).
 
@@ -166,6 +143,10 @@ raftmage/
 │   └── architecture.md
 ├── .github/workflows/
 │   └── ci.yml
+├── cmd/
+│   └── raftmaged/           # the real, runnable server binary
+│       ├── main.go          # flags -> Node + Transport + Storage + StateMachine + both gRPC servers
+│       └── main_test.go     # 6 tests, covering parsePeers
 └── internal/
     ├── raft/                    # the consensus core
     │   ├── raft.go              # Node state: roles, terms, log
@@ -207,7 +188,7 @@ raftmage/
         └── *_test.go             # 7 tests, including a 3-node cluster with a real client over real TCP sockets
 ```
 
-No `cmd/` entrypoint yet; there is nothing to `go run`. See Roadmap.
+`go run ./cmd/raftmaged -id=... -raft-addr=... -client-addr=... -peers=...` is now a real, runnable command; see Local setup below for a full three-node example.
 
 ## Local setup
 
@@ -229,7 +210,7 @@ make test
 
 `make race` / `go test ./... -race` requires a cgo-capable toolchain. Works in CI, may not work on every local machine.
 
-The closest thing to a running demo right now: three real nodes electing a leader, staying stable under it, and replicating and committing a real client write via `Propose`, end to end:
+Every capability above, individually proven through the test suite: three real nodes electing a leader, staying stable under it, and replicating and committing a real client write via `Propose`, end to end (a real multi-process cluster demo, no test runner involved, follows in the next section):
 
 ```
 go test ./internal/raft -run TestLeaderHeartbeatsPreventFollowerReelection -v
@@ -246,6 +227,33 @@ go test ./internal/clientapi -run TestThreeNodeClusterCommitsPutOverRealGRPCClie
 ```
 
 The last command's own test output includes a real `log/slog` structured log line (`node=... term=... role=... candidate=... msg="granted vote"`), the smallest possible look at what `Node.SetLogger` actually produces.
+
+## Running a real cluster
+
+`cmd/raftmaged` is a real binary now, not something proven only through `go test`. Three terminals, three instances, forming a real three-node cluster over localhost:
+
+```
+# terminal 1
+go run ./cmd/raftmaged -id=node-1 -raft-addr=127.0.0.1:9001 -client-addr=127.0.0.1:9101 \
+  -peers=node-2=127.0.0.1:9002,node-3=127.0.0.1:9003
+
+# terminal 2
+go run ./cmd/raftmaged -id=node-2 -raft-addr=127.0.0.1:9002 -client-addr=127.0.0.1:9102 \
+  -peers=node-1=127.0.0.1:9001,node-3=127.0.0.1:9003
+
+# terminal 3
+go run ./cmd/raftmaged -id=node-3 -raft-addr=127.0.0.1:9003 -client-addr=127.0.0.1:9103 \
+  -peers=node-1=127.0.0.1:9001,node-2=127.0.0.1:9002
+```
+
+Each instance's own `log/slog` output shows its election activity; within a few hundred milliseconds one of the three logs "won election". Since none of the three servers register gRPC reflection, a plain `grpcurl` call needs the `.proto` file pointed at directly, against whichever address logged the win, for example:
+
+```
+grpcurl -plaintext -import-path internal/clientapi/kvpb -proto kv.proto \
+  -d '{"key":"foo","value":"YmFy"}' 127.0.0.1:9101 kvpb.KV/Put
+```
+
+Ctrl-C any instance to see the graceful shutdown log line and a real re-election among the remaining two.
 
 ## Documentation
 
