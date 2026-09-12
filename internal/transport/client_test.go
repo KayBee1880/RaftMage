@@ -2,6 +2,7 @@ package transport
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"raftmage/internal/kvstore"
@@ -123,6 +124,17 @@ func TestGRPCTransportReturnsErrorForUnknownPeer(t *testing.T) {
 	if _, err := transport.SendRequestVote("ghost", raft.RequestVoteArgs{Term: 1}); err == nil {
 		t.Fatal("expected an error for a peer with no known address, got nil")
 	}
+}
+
+func TestNewServerRegistersReflection(t *testing.T) {
+	server := NewServer(raft.NewNode("node-1", nil, nil, nil))
+
+	for name := range server.GetServiceInfo() {
+		if strings.Contains(name, "ServerReflection") {
+			return
+		}
+	}
+	t.Fatalf("expected a ServerReflection service to be registered, got services: %v", server.GetServiceInfo())
 }
 
 func TestGRPCTransportReturnsErrorWhenPeerUnreachable(t *testing.T) {

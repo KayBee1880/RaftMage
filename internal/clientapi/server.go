@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 
 	"raftmage/internal/clientapi/kvpb"
@@ -98,5 +99,6 @@ func (s *GRPCServer) statusFor(err error) error {
 func NewServer(node *raft.Node, store Getter) *grpc.Server {
 	s := grpc.NewServer()
 	kvpb.RegisterKVServer(s, NewGRPCServer(node, store))
+	reflection.Register(s)
 	return s
 }

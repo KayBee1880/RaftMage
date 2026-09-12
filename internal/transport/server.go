@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 
 	"raftmage/internal/raft"
 	"raftmage/internal/transport/raftpb"
@@ -71,5 +72,6 @@ func entryTypeFromPB(t raftpb.EntryType) raft.EntryType {
 func NewServer(node *raft.Node) *grpc.Server {
 	s := grpc.NewServer()
 	raftpb.RegisterRaftServer(s, NewGRPCServer(node))
+	reflection.Register(s)
 	return s
 }

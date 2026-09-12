@@ -82,6 +82,17 @@ func TestGetReturnsNotFoundForMissingKey(t *testing.T) {
 	}
 }
 
+func TestNewServerRegistersReflection(t *testing.T) {
+	server := NewServer(raft.NewNode("node-1", nil, nil, nil), kvstore.NewStore())
+
+	for name := range server.GetServiceInfo() {
+		if strings.Contains(name, "ServerReflection") {
+			return
+		}
+	}
+	t.Fatalf("expected a ServerReflection service to be registered, got services: %v", server.GetServiceInfo())
+}
+
 func TestPutOnLeaderCommitsAndReturnsIndex(t *testing.T) {
 	store := kvstore.NewStore()
 	node := leaderNode(t)
