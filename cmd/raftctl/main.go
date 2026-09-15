@@ -13,30 +13,52 @@ import (
 	"google.golang.org/grpc/status"
 
 	"raftmage/internal/clientapi/kvpb"
+	"raftmage/internal/sharding"
 )
 
 func main() {
-	addr := flag.String("addr", "", "address of a raftmaged instance's client API, e.g. 127.0.0.1:9101 (required)")
+	addr := flag.String("addr", "", "address of a raftmaged instance's client API, e.g. 127.0.0.1:9101 (mutually exclusive with -shard-map)")
+	shardMapPath := flag.String("shard-map", "", "path to a JSON shard map file; routes by key to the owning shard's replicas (mutually exclusive with -addr)")
 	timeout := flag.Duration("timeout", 5*time.Second, "how long to wait for the RPC to complete")
 	flag.Parse()
 
-	if *addr == "" {
-		fmt.Fprintln(os.Stderr, "raftctl: -addr is required")
+	if (*addr == "") == (*shardMapPath == "") {
+		fmt.Fprintln(os.Stderr, "raftctl: exactly one of -addr or -shard-map is required")
 		printUsage(os.Stderr)
 		os.Exit(2)
 	}
 
-	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	args := flag.Args()
+
+	var addrs []string
+	if *addr != "" {
+		addrs = []string{*addr}
+	} else {
+		sm, err := sharding.LoadShardMap(*shardMapPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "raftctl: %v\n", err)
+			os.Exit(2)
+		}
+		key, err := keyForRouting(args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "raftctl: %v\n", err)
+			printUsage(os.Stderr)
+			os.Exit(2)
+		}
+		addrs = sm.ReplicasForKey(key)
+	}
+
+	clients, closeAll, err := dialAll(addrs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "raftctl: failed to dial %s: %v\n", *addr, err)
+		fmt.Fprintf(os.Stderr, "raftctl: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer closeAll()
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	if err := runCommand(ctx, kvpb.NewKVClient(conn), flag.Args(), os.Stdout); err != nil {
+	if err := tryReplicas(ctx, clients, args, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "raftctl: %v\n", status.Convert(err).Message())
 		os.Exit(1)
 	}
@@ -44,6 +66,48 @@ func main() {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: raftctl -addr=host:port <get|put|delete> <key> [value]")
+	fmt.Fprintln(w, "   or: raftctl -shard-map=shards.json <get|put|delete> <key> [value]")
+}
+
+func keyForRouting(args []string) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("usage: <get|put|delete> <key> [value]")
+	}
+	return args[1], nil
+}
+
+func dialAll(addrs []string) (clients []kvpb.KVClient, closeAll func(), err error) {
+	var conns []*grpc.ClientConn
+	closeAll = func() {
+		for _, conn := range conns {
+			conn.Close()
+		}
+	}
+	for _, addr := range addrs {
+		conn, dialErr := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if dialErr != nil {
+			closeAll()
+			return nil, func() {}, fmt.Errorf("failed to dial %s: %w", addr, dialErr)
+		}
+		conns = append(conns, conn)
+		clients = append(clients, kvpb.NewKVClient(conn))
+	}
+	return clients, closeAll, nil
+}
+
+func tryReplicas(ctx context.Context, clients []kvpb.KVClient, args []string, stdout io.Writer) error {
+	if len(clients) == 0 {
+		return fmt.Errorf("no replicas available")
+	}
+	var lastErr error
+	for _, client := range clients {
+		if err := runCommand(ctx, client, args, stdout); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func runCommand(ctx context.Context, client kvpb.KVClient, args []string, stdout io.Writer) error {
