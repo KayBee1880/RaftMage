@@ -52,12 +52,13 @@ Principles this build has actually practiced, each one checkable against the com
 - **State machine (`internal/kvstore.Store`)**: a real, in-memory key-value store, `Put`/`Delete` commands JSON-encoded into the same opaque `[]byte` `Propose` already accepted, applied to every node's own store the instant an entry commits (`Node.SetStateMachine`, nil by default, no existing test affected). `StateMachine` also has `Snapshot()`/`Restore()`, so `Compact` captures a real snapshot and `InstallSnapshot` carries it to a far-behind follower, and a node that restarts after ever compacting restores its own state machine from disk too, closing what was originally a deliberately scoped, named gap in a follow-up milestone rather than left open. Proven end to end across three real, concurrently-running nodes, each with its own independent store that has to converge without sharing memory: `TestLeaderAppliesProposedEntriesToStateMachineAcrossRealNodes`.
 - **Client API (gRPC `Get`/`Put`/`Delete`, `internal/clientapi`)**: the first network surface for anything outside the cluster's own peers, a genuinely separate `KV` gRPC service from the peer-to-peer `Raft` one, wire format generated from its own `.proto` file. `Put`/`Delete` call `Propose` and then wait for the entry to actually be applied (`Node.LastApplied()` reaching the proposed index), not just accepted by the leader, so a successful reply means the same thing this project's own stated guarantee means everywhere else. Rejected on a non-leader with a `codes.FailedPrecondition` status naming `Node.CurrentLeader()` (a new accessor, tracking the last known leader from every legitimate `AppendEntries`/`InstallSnapshot`/election win) as a retry hint when one is known. Uses the caller's own gRPC request context for cancellation, a `codes.DeadlineExceeded` status if it expires before commitment, rather than inventing a fixed timeout the way the peer transport layer had to. `Get` reads directly from the local node's attached store, no leader check, no waiting, an explicitly eventually-consistent read, matching `internal/kvstore`'s own already-stated limitation, not a stronger guarantee than what's actually implemented. Proven end to end with three real nodes and a real gRPC client reaching a real leader over TCP: `TestThreeNodeClusterCommitsPutOverRealGRPCClientAPI`.
 - **A real, runnable server binary (`cmd/raftmaged`)**: reads `-id`/`-raft-addr`/`-client-addr`/`-peers`/`-data-file`/`-metrics-addr` flags (or a single `-config` JSON file in place of all of them), wires up a real `*raft.Node` with its peer `Transport`, `Storage`, and `StateMachine`, starts the peer-to-peer `Raft` gRPC server, the client-facing `KV` gRPC server, and (when `-metrics-addr` is set) an HTTP metrics endpoint, calls `Node.Run()`, and shuts down gracefully on `SIGINT`/`SIGTERM`. This is the first thing in this project runnable with `go run`, not just `go test`.
-- **A CLI client (`cmd/raftctl`)**: a small binary wrapping `kvpb.KVClient` for `get`/`put`/`delete` from a terminal against a running `raftmaged` instance, so poking at a live cluster no longer needs `grpcurl` and a `.proto` file passed by hand.
+- **A CLI client (`cmd/raftctl`)**: a small binary wrapping `kvpb.KVClient` for `get`/`put`/`delete` from a terminal against a running `raftmaged` instance (`-addr`), or against a sharded deployment (`-shard-map`, see below), so poking at a live cluster no longer needs `grpcurl` and a `.proto` file passed by hand.
 - **gRPC reflection**: both `raftmaged` gRPC servers (peer-to-peer `Raft` and client-facing `KV`) register the standard reflection service, so a generic tool like `grpcurl` can discover their methods and message shapes at runtime without the `.proto` files.
 - **A Prometheus-format metrics endpoint (`internal/metrics`)**: `-metrics-addr` on `raftmaged` serves `Node.Metrics()`'s nine counters as plain-text Prometheus exposition format (`# HELP`/`# TYPE` comments, `raftmage_*_total` counter names), hand-rolled against the standard library alone, no new dependency, scrapeable by a real Prometheus instance today.
-- **164 tests, all passing** (105 in `internal/raft`, 10 in `internal/kvstore`, 4 in `internal/storage`, 7 in `internal/transport`, 8 in `internal/sim`, 8 in `internal/clientapi`, 3 in `internal/metrics`, 14 in `cmd/raftmaged`, 5 in `cmd/raftctl`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
+- **Sharding (`internal/sharding`)**: splits the keyspace across more than one independent Raft group, each shard a completely ordinary, already-proven single-group `raftmaged` cluster with zero sharding awareness of its own. Routing is entirely client-side: `internal/sharding.ShardForKey` hashes a key (`hash/fnv`, stdlib only) to a shard number, `ShardMap`/`LoadShardMap` reads a static JSON file describing each shard's replica addresses, and `cmd/raftctl -shard-map=...` puts the two together, hashing the command's own key, then trying every replica of the owning shard in turn (`tryReplicas`) until one accepts, since a client has no advance way to know which replica currently leads. Deliberately the smaller of two options put to the user directly: no new gateway/router service, no live resharding (the shard count is fixed once the shard map is written; adding or removing shards later is a manual redeploy, not an online operation), both real, named limits rather than oversights. Proven end to end against a real follower and a real leader over actual gRPC connections, in either order: `TestTryReplicasSucceedsAgainstLeaderAfterFollowerRejectsOverRealGRPC`.
+- **184 tests, all passing** (105 in `internal/raft`, 10 in `internal/kvstore`, 4 in `internal/storage`, 7 in `internal/transport`, 8 in `internal/sim`, 8 in `internal/clientapi`, 3 in `internal/metrics`, 13 in `internal/sharding`, 14 in `cmd/raftmaged`, 12 in `cmd/raftctl`), run automatically on every push and pull request via GitHub Actions (`go build`, `go vet`, `go test -race`).
 
-A cluster can now be started, written to, read from, and scraped for metrics as a real, standalone process, not just inside Go's test runner. See Roadmap.
+A cluster can now be started, written to, read from, and scraped for metrics as a real, standalone process, not just inside Go's test runner, and the keyspace can now be split across more than one such cluster. See Roadmap.
 
 ## Architecture
 
@@ -89,7 +90,22 @@ graph LR
     TP <--> Peer2
 ```
 
-**Target state**: the diagram above *is* the target state for a single-group cluster now, not an aspiration shown for direction, the `cmd/raftmaged` milestone was the last piece of it. The one remaining gap beyond this diagram is sharding, splitting the keyspace across more than one independent Raft group, an explicit stretch goal past the core single-group KV store this project set out to build, not something the diagram above was ever meant to show.
+**Target state**: the diagram above *is* the target state for a single-group cluster, not an aspiration, the `cmd/raftmaged` milestone was the last piece of it. Sharding, the one item past the core single-group KV store this project set out to build, is real now too, entirely client-side: every shard below is one ordinary instance of the diagram above, with zero sharding awareness of its own, and `cmd/raftctl` is the one piece of this project that actually knows how to route between them.
+
+```mermaid
+graph LR
+    Client["raftctl -shard-map=shards.json"]
+    SM["internal/sharding.ShardForKey<br/>+ ShardMap (static JSON file)"]
+    Shard0["Shard 0<br/>(ordinary raftmaged cluster)"]
+    Shard1["Shard 1<br/>(ordinary raftmaged cluster)"]
+    Shard2["Shard 2<br/>(ordinary raftmaged cluster)"]
+    Client -->|hash the key, pick a shard| SM
+    Client -->|tryReplicas: try each<br/>replica until one accepts| Shard0
+    Client -.-> Shard1
+    Client -.-> Shard2
+```
+
+Fixed shard count only, decided once when the shard map file is written: adding or removing shards later is a manual redeploy and a manual key reassignment, not a live, online operation, an explicit, named limit, not an oversight, the same "stretch goal, not a full production system" framing sharding itself already carries. No new gateway or router service either: the alternative, a single stateless proxy every client always talks to, was a real option put to the user directly, and the smaller, no-new-service, no-new-single-point-of-failure choice was made instead.
 
 ## Tech stack
 
@@ -103,8 +119,9 @@ graph LR
 | GitHub Actions | Free, native CI for a GitHub-hosted repo; runs build, `vet`, and race-detector tests on every push/PR. |
 | Go's standard `math/rand` (seeded) | `internal/sim`'s `SimTransport` draws every fault-injection decision (delay, drop) from one seeded `*rand.Rand`, so a fixed seed reproduces the same aggregate fault behavior without needing an external fuzzing framework. |
 | Go's standard `log/slog` | `Node.SetLogger` accepts a `*slog.Logger` directly, no custom logging interface invented; structured, leveled logging with pluggable output handlers (text, JSON, or a custom one) comes from the standard library alone. |
-| Go's standard `encoding/json` | `internal/kvstore`'s `Command`/`Op` encoding, `cmd/raftmaged`'s own `-config` file format, the same reasoning `internal/storage.FileStorage` already chose JSON for: human-readable, standard-library only, and fast enough at this project's scale. |
+| Go's standard `encoding/json` | `internal/kvstore`'s `Command`/`Op` encoding, `cmd/raftmaged`'s own `-config` file format, `internal/sharding`'s shard-map file, the same reasoning `internal/storage.FileStorage` already chose JSON for: human-readable, standard-library only, and fast enough at this project's scale. |
 | Go's standard `net/http` | `internal/metrics.Handler`, a hand-rolled Prometheus text-exposition-format endpoint; no metrics client library taken on, since the format itself is simple enough to write directly against the standard library. |
+| Go's standard `hash/fnv` | `internal/sharding.ShardForKey`'s own hash function (FNV-1a, 32-bit); a routing decision, not a security boundary, so a fast, simple, standard-library hash is enough, no cryptographic hash or external library needed. |
 
 **Planned**
 
@@ -112,6 +129,7 @@ graph LR
 |---|---|
 | Virtual-time deterministic simulator | A distinct, larger step past `internal/sim`'s current seeded-fault-injection-over-real-time approach |
 | Structured log shipping (to a log aggregator) | `Node.SetLogger` already emits structured `log/slog` output; nothing yet ships it anywhere beyond `cmd/raftmaged`'s own stdout |
+| Live resharding | Moving key ranges between shards without downtime; declined for the current sharding milestone as its own, much larger distributed-systems problem (needs a coordination mechanism, a data-migration protocol, a dual-read/dual-write transition period) |
 
 ## Roadmap
 
@@ -133,7 +151,9 @@ graph LR
 - [x] `InstallSnapshot` real state-machine payload (`StateMachine.Snapshot`/`Restore`, `Compact` captures it, the RPC carries it; also fixed a related gap, restoring the state machine after a restart that followed compaction)
 - [x] Client API (gRPC `Get`/`Put`/`Delete`, `internal/clientapi`; waits for real commitment, not just leader acceptance, and gives a rejected write a `Node.CurrentLeader()` retry hint)
 - [x] `cmd/` entrypoint (`cmd/raftmaged`, a real, runnable server binary configured entirely via CLI flags; graceful shutdown on `SIGINT`/`SIGTERM`)
-- [ ] Sharding (stretch goal, past the core single-group KV store) ← current, and the only remaining item
+- [x] Sharding (`internal/sharding`, stretch goal past the core single-group KV store; client-side routing via `cmd/raftctl -shard-map`, a fixed shard count, no new gateway service)
+
+Every item on this roadmap, including the stretch goal, is now checked. See "What's actually working right now" above and [docs/architecture.md](docs/architecture.md) for the honest boundaries each one still carries (no TLS, a fixed shard count, no live resharding, no structured log shipping), each a deliberate, named scope decision, not an oversight.
 
 Fuller status, including what's implemented vs. planned per component: [docs/architecture.md](docs/architecture.md).
 
@@ -155,9 +175,9 @@ raftmage/
 │   ├── raftmaged/           # the real, runnable server binary
 │   │   ├── main.go          # flags/config file -> Node + Transport + Storage + StateMachine + all servers
 │   │   └── main_test.go     # 14 tests, covering parsePeers, resolveConfig, loadConfigFile
-│   └── raftctl/             # a small CLI client for a running raftmaged instance
-│       ├── main.go          # get/put/delete over kvpb.KVClient
-│       └── main_test.go     # 5 tests, including a round trip over a real gRPC server
+│   └── raftctl/             # a small CLI client: single-cluster (-addr) or sharded (-shard-map)
+│       ├── main.go          # get/put/delete over kvpb.KVClient, tryReplicas retry across a shard's replicas
+│       └── main_test.go     # 12 tests, including a real leader-after-follower-rejects round trip
 └── internal/
     ├── raft/                    # the consensus core
     │   ├── raft.go              # Node state: roles, terms, log
@@ -197,12 +217,16 @@ raftmage/
     │   │   └── kv_grpc.pb.go     # generated by protoc, not hand-written
     │   ├── server.go             # GRPCServer: Propose + wait for commitment, structured gRPC status errors, reflection registered
     │   └── *_test.go             # 8 tests, including a 3-node cluster with a real client over real TCP sockets
-    └── metrics/                  # HTTP handler exposing Node.Metrics() in Prometheus text format
-        ├── handler.go            # Handler: GET /metrics -> raftmage_*_total counters
-        └── handler_test.go       # 3 tests
+    ├── metrics/                  # HTTP handler exposing Node.Metrics() in Prometheus text format
+    │   ├── handler.go            # Handler: GET /metrics -> raftmage_*_total counters
+    │   └── handler_test.go       # 3 tests
+    └── sharding/                 # client-side key routing across independent Raft groups (shards)
+        ├── hash.go               # ShardForKey: FNV-1a key -> shard number
+        ├── shardmap.go           # ShardMap/LoadShardMap: static JSON shard -> replica-addresses file
+        └── *_test.go             # 13 tests
 ```
 
-`go run ./cmd/raftmaged -id=... -raft-addr=... -client-addr=... -peers=...` (or `-config=node.json`) is now a real, runnable command; see Local setup below for a full three-node example, including `raftctl` and the metrics endpoint.
+`go run ./cmd/raftmaged -id=... -raft-addr=... -client-addr=... -peers=...` (or `-config=node.json`) is now a real, runnable command; see Local setup below for a full three-node example, including `raftctl`, the metrics endpoint, and a sharded deployment.
 
 ## Local setup
 
@@ -240,6 +264,7 @@ go test ./internal/raft -run TestLeaderAppliesProposedEntriesToStateMachineAcros
 go test ./internal/clientapi -run TestThreeNodeClusterCommitsPutOverRealGRPCClientAPI -v
 go test ./cmd/raftctl -run TestRunCommandPutThenGetRoundTripsOverRealGRPC -v
 go test ./internal/metrics -run TestHandlerWritesCurrentCounterValues -v
+go test ./cmd/raftctl -run TestTryReplicasSucceedsAgainstLeaderAfterFollowerRejectsOverRealGRPC -v
 ```
 
 The last command's own test output includes a real `log/slog` structured log line (`node=... term=... role=... candidate=... msg="granted vote"`), the smallest possible look at what `Node.SetLogger` actually produces.
@@ -284,6 +309,42 @@ curl http://127.0.0.1:9201/metrics
 ```
 
 Ctrl-C any instance to see the graceful shutdown log line and a real re-election among the remaining two.
+
+## Running a sharded cluster
+
+Each shard is just another instance of the cluster above, `raftmaged` itself has no idea it's part of a shard at all. For a demo that stays manageable in one terminal window each, three shards, each a single-node cluster (a real deployment would give each shard the same three-node treatment as above, `-shard-map` doesn't care how many replicas a shard has):
+
+```
+# terminal 1 (shard 0)
+go run ./cmd/raftmaged -id=shard0 -raft-addr=127.0.0.1:9301 -client-addr=127.0.0.1:9311
+
+# terminal 2 (shard 1)
+go run ./cmd/raftmaged -id=shard1 -raft-addr=127.0.0.1:9302 -client-addr=127.0.0.1:9312
+
+# terminal 3 (shard 2)
+go run ./cmd/raftmaged -id=shard2 -raft-addr=127.0.0.1:9303 -client-addr=127.0.0.1:9313
+```
+
+A shard map file, `shards.json`, describing where each shard's client API actually lives:
+
+```json
+{
+  "shards": [
+    {"id": 0, "replicas": ["127.0.0.1:9311"]},
+    {"id": 1, "replicas": ["127.0.0.1:9312"]},
+    {"id": 2, "replicas": ["127.0.0.1:9313"]}
+  ]
+}
+```
+
+Then `raftctl` routes by key on its own, no `-addr` needed:
+
+```
+go run ./cmd/raftctl -shard-map=shards.json put foo bar
+go run ./cmd/raftctl -shard-map=shards.json get foo
+```
+
+Different keys land on different shards (`internal/sharding.ShardForKey`'s own hash decides which); each shard's own terminal shows only the traffic actually routed to it.
 
 ## Documentation
 
