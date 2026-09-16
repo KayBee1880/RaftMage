@@ -171,6 +171,13 @@ raftmage/
 │   └── architecture.md
 ├── .github/workflows/
 │   └── ci.yml
+├── scripts/                     # Windows PowerShell-safe wrappers around the raw demo commands below
+│   ├── run-node1.ps1            # (see the "Windows PowerShell note" under Running a real cluster)
+│   ├── run-node2.ps1
+│   ├── run-node3.ps1
+│   ├── put.ps1                  # .\scripts\put.ps1 -Addr host:port -Key k -Value v
+│   ├── get.ps1                  # .\scripts\get.ps1 -Addr host:port -Key k
+│   └── delete.ps1               # .\scripts\delete.ps1 -Addr host:port -Key k
 ├── cmd/
 │   ├── raftmaged/           # the real, runnable server binary
 │   │   ├── main.go          # flags/config file -> Node + Transport + Storage + StateMachine + all servers
@@ -271,6 +278,8 @@ The last command's own test output includes a real `log/slog` structured log lin
 
 ## Running a real cluster
 
+**Windows PowerShell note**: Windows PowerShell (5.1 especially) can mis-tokenize a bare argument containing a dotted address, like `-client-addr=127.0.0.1:9101`, silently splitting it into two broken arguments before the program ever sees them, `-client-addr=127` and `.0.0.1:9101`, which then fails with a confusing "required" or "unknown command" error even though the command was typed correctly. If that happens, skip the raw commands below and use the ready-made scripts in [`scripts/`](scripts/) instead: they build each argument as a real PowerShell array element and splat it into the call, which avoids the bug entirely, `powershell -ExecutionPolicy Bypass -File .\scripts\run-node1.ps1` in place of the equivalent raw command, `.\scripts\put.ps1 -Key foo -Value bar` in place of a raw `raftctl put`, and so on. This isn't specific to any one machine, it reproduces the same way for any bare `host:port` argument passed to a native executable from an interactive PowerShell prompt on this platform.
+
 `cmd/raftmaged` is a real binary now, not something proven only through `go test`. Three terminals, three instances, forming a real three-node cluster over localhost, each also serving Prometheus-format metrics on its own `-metrics-addr`:
 
 ```
@@ -295,7 +304,7 @@ Each instance's own `log/slog` output shows its election activity; within a few 
 grpcurl -plaintext -d '{"key":"foo","value":"YmFy"}' 127.0.0.1:9101 kvpb.KV/Put
 ```
 
-Or the bundled CLI client, which does the base64 encoding for you:
+Or the bundled CLI client, which does the base64 encoding for you (on Windows PowerShell, use `.\scripts\put.ps1 -Addr 127.0.0.1:9101 -Key foo -Value bar` / `.\scripts\get.ps1 -Addr 127.0.0.1:9101 -Key foo` instead, see the note above):
 
 ```
 go run ./cmd/raftctl -addr=127.0.0.1:9101 put foo bar
